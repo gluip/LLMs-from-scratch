@@ -363,24 +363,31 @@ if __name__ == "__main__":
     train_ids, test_ids = ids_alles[:split], ids_alles[split:]
     print(f"\ntrain: {len(train_ids)} tekens, test: {len(test_ids)} tekens")
 
-    # één training met de vaste config hierboven
-    _, train_losses, test_stappen, test_losses = train_affiniteitsmodel(
-        n_lagen=N_LAGEN, n_embed=N_EMBED, train_ids=train_ids, test_ids=test_ids, tokenizer=tokenizer,
-        lengte=LENGTE, gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
-        losse_qk=LOSSE_QK, losse_v=LOSSE_V, gebruik_layernorm=GEBRUIK_LAYERNORM, gebruik_masker=GEBRUIK_MASKER,
-        dropout=DROPOUT,
-        aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
-        lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
-    )
+    # config hierboven (N_LAGEN=5, N_EMBED, LENGTE, ...) vast, nu opnieuw: alles-in-1 vs QKV apart
+    varianten = {"alles-in-1": dict(losse_qk=False, losse_v=False), "QKV apart": dict(losse_qk=True, losse_v=True)}
+    resultaten = {}
+    for naam, opts in varianten.items():
+        _, train_losses, test_stappen, test_losses = train_affiniteitsmodel(
+            n_lagen=N_LAGEN, n_embed=N_EMBED, train_ids=train_ids, test_ids=test_ids, tokenizer=tokenizer,
+            lengte=LENGTE, gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
+            gebruik_layernorm=GEBRUIK_LAYERNORM, gebruik_masker=GEBRUIK_MASKER, dropout=DROPOUT, **opts,
+            aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
+            lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
+        )
+        resultaten[naam] = (train_losses, test_stappen, test_losses)
 
-    # plotje: train/test loss over de training heen
+    # plotje: train/test loss, alles-in-1 vs QKV apart, in dezelfde kleur per model
     plt.figure(figsize=(9, 6))
-    plt.plot(range(len(train_losses)), train_losses, alpha=0.3, label="train")
-    plt.plot(test_stappen, test_losses, marker="o", label="test")
+    kleuren = plt.cm.tab10.colors
+    for i, naam in enumerate(varianten):
+        train_losses, test_stappen, test_losses = resultaten[naam]
+        kleur = kleuren[i % len(kleuren)]
+        plt.plot(range(len(train_losses)), train_losses, color=kleur, alpha=0.25)
+        plt.plot(test_stappen, test_losses, color=kleur, marker="o", label=naam)
     plt.axhline(max_loss.item(), color="gray", linestyle="--", label="willekeurig gokken")
     plt.xlabel("stap")
     plt.ylabel("loss")
-    plt.title(f"train/test loss (n_lagen={N_LAGEN}, n_embed={N_EMBED}, vaag = train, stippen = test)")
+    plt.title(f"train/test loss: alles-in-1 vs QKV apart (n_lagen={N_LAGEN}, n_embed={N_EMBED}, vaag = train, stippen = test)")
     plt.legend()
     plt.tight_layout()
     plot_pad = Path(__file__).parent / "loss.png"
