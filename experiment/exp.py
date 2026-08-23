@@ -51,50 +51,123 @@ class AffiniteitsLaag(nn.Module):
     """Eén stackbare attention-laag: neemt (batch, T, n_embed) en geeft ook
     (batch, T, n_embed) terug, zodat je er meerdere achter elkaar kunt zetten.
 
-    In plaats van aparte Q- en K-matrices (zoals bij echte attention)
-    gebruiken we hier maar één geleerde matrix W: elke vector wordt ermee
-    geprojecteerd, en de affiniteit tussen positie i en j is simpelweg het
-    inproduct van hun projecties. Hoog inproduct = de vectors wijzen dezelfde
-    kant op = hoge affiniteit. Een causaal masker zorgt dat positie i alleen
-    naar i en eerder mag kijken (je mag het antwoord niet vooruit zien).
+    Met `losse_qk=False` (default) gebruiken we net als voorheen maar één
+    gedeelde matrix W voor zowel "wie zoek ik" als "wie bied ik aan": elke
+    vector wordt ermee geprojecteerd, en de affiniteit tussen positie i en j
+    is het inproduct van die ene projectie met zichzelf. Nadeel daarvan
+    (zoals we eerder zagen): het inproduct van een vector met zichzelf is
+    vrijwel altijd het grootst, dus elke positie let vooral op zichzelf.
+    Met `losse_qk=True` krijgen Q en K allebei hun eigen matrix, zodat "waar
+    ik naar zoek" en "wat ik aanbied" losgekoppeld zijn.
 
-    De V (value) is voorlopig nog gelijk aan diezelfde geprojecteerde g —
-    later los te trekken in een eigen matrix, net als W nu al apart is van
-    de ruwe input.
+    Met `losse_v=False` (default) is de V (value) nog gelijk aan diezelfde
+    projectie die ook voor de affiniteit gebruikt wordt. Met `losse_v=True`
+    krijgt V zijn eigen geleerde matrix — dan is "waar let ik op" (affiniteit)
+    ook losgekoppeld van "wat neem ik mee" (value).
+
+    losse_qk=True + losse_v=True samen is het volledige Q/K/V zoals bij echte
+    attention; allebei False is de "alles-in-1"-versie waarmee we begonnen.
     """
 
-    def __init__(self, n_embed):
+    def __init__(self, n_embed, losse_qk=False, losse_v=False):
         super().__init__()
         self.n_embed = n_embed
-        self.W = nn.Linear(n_embed, n_embed, bias=False)  # de ene gedeelde matrix
+        self.losse_qk = losse_qk
+        if losse_qk:
+            self.Q = nn.Linear(n_embed, n_embed, bias=False)
+            self.K = nn.Linear(n_embed, n_embed, bias=False)
+        else:
+            self.W = nn.Linear(n_embed, n_embed, bias=False)  # de ene gedeelde matrix
+        self.V = nn.Linear(n_embed, n_embed, bias=False) if losse_v else None
 
     def forward(self, h):
         # h: (batch, T, n_embed) -> ook weer (batch, T, n_embed), dus stackbaar
         T = h.shape[1]
-        g = self.W(h)               # (batch, T, n_embed), geprojecteerd
-        affiniteit = g @ g.transpose(-2, -1)           # (batch, T, T), inproduct per paar
+        if self.losse_qk:
+            q = self.Q(h)
+            k = self.K(h)
+            affiniteit = q @ k.transpose(-2, -1)  # (batch, T, T), inproduct query x key
+            basis = q  # terugvaloptie voor v, als losse_v uitstaat
+        else:
+            q = k = self.W(h)               # (batch, T, n_embed), geprojecteerd
+            affiniteit = q @ k.transpose(-2, -1)           # (batch, T, T), inproduct per paar
+            basis = q
         affiniteit = affiniteit / self.n_embed ** 0.5   # schaling, zoals bij echte attention
 
         masker = torch.triu(torch.ones(T, T, dtype=torch.bool), diagonal=1)
         affiniteit = affiniteit.masked_fill(masker, float("-inf"))  # niet vooruitkijken
 
         gewichten = torch.softmax(affiniteit, dim=-1)  # per rij: kansen die optellen tot 1
-        v = g  # de value is nu nog dezelfde g als hierboven, nog niet losgetrokken
+        v = self.V(h) if self.V is not None else basis  # losse matrix op h, of terugval
         output = gewichten @ v  # (batch, T, n_embed), gewogen mix van de v's
         return output, gewichten
 
 
-class AffiniteitsModel(nn.Module):
-    """Embedding -> n_lagen stackbare AffiniteitsLaag'en -> voorspelling per letter."""
+class FeedForwardLaag(nn.Module):
+    """Verlaagt de dimensie (delen door 4), niet-lineariteit, en weer terug naar
+    n_embed. Ook stackbaar: (batch, T, n_embed) -> (batch, T, n_embed). Werkt
+    per positie apart (geen menging tussen posities, dat doet de attention-laag)."""
 
-    def __init__(self, vocab_size, n_embed=12, n_lagen=1):
+    def __init__(self, n_embed):
         super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embed, n_embed // 4),
+            nn.ReLU(),
+            nn.Linear(n_embed // 4, n_embed),
+        )
+
+    def forward(self, h):
+        return self.net(h)
+
+
+class Blok(nn.Module):
+    """Eén stackbaar blok: een AffiniteitsLaag, optioneel gevolgd door een
+    FeedForwardLaag. (batch, T, n_embed) -> (batch, T, n_embed).
+
+    Beide sub-lagen zijn residu-verbindingen: h = h + sublaag(h), niet
+    h = sublaag(h). Zo kan een nog-niet-getrainde (of destructieve, zoals de
+    smalle feedforward-bottleneck) sublaag zich gedragen als bijna-niks-doen,
+    in plaats van verplicht alles te vervangen wat er al in h zat.
+    """
+
+    def __init__(self, n_embed, gebruik_feedforward=False, losse_qk=False, losse_v=False):
+        super().__init__()
+        self.attentie = AffiniteitsLaag(n_embed, losse_qk=losse_qk, losse_v=losse_v)
+        self.feedforward = FeedForwardLaag(n_embed) if gebruik_feedforward else None
+
+    def forward(self, h):
+        attentie_uit, gewichten = self.attentie(h)
+        h = h + attentie_uit  # residu
+        if self.feedforward is not None:
+            h = h + self.feedforward(h)  # ook residu
+        return h, gewichten
+
+
+class AffiniteitsModel(nn.Module):
+    """Embedding -> n_lagen stackbare AffiniteitsLaag'en -> voorspelling per letter.
+
+    Zonder positie-informatie weet de affiniteit alleen "lijkt dit karakter op
+    dat karakter", niet "hoe ver terug stond het". Met `gebruik_positie=True`
+    krijgt elke positie 0..T-1 zijn eigen geleerde vector (net als de letters
+    dat hebben), opgeteld bij de letter-embedding — zodat het model afstand
+    kan leren meewegen.
+    """
+
+    def __init__(self, vocab_size, n_embed=12, n_lagen=1, gebruik_positie=True, gebruik_feedforward=False, losse_qk=False, losse_v=False, max_lengte=128):
+        super().__init__()
+        self.gebruik_positie = gebruik_positie
         self.embed = nn.Embedding(vocab_size, n_embed)
-        self.lagen = nn.ModuleList([AffiniteitsLaag(n_embed) for _ in range(n_lagen)])
+        if gebruik_positie:
+            self.pos_embed = nn.Embedding(max_lengte, n_embed)
+        self.lagen = nn.ModuleList([Blok(n_embed, gebruik_feedforward, losse_qk, losse_v) for _ in range(n_lagen)])
         self.uit = nn.Linear(n_embed, vocab_size)  # enige plek die naar vocab_size gaat
 
     def forward(self, x):
+        T = x.shape[1]
         h = self.embed(x)  # (batch, T, n_embed)
+        if self.gebruik_positie:
+            posities = torch.arange(T, device=x.device)
+            h = h + self.pos_embed(posities)  # zelfde vector voor elke positie i, over de hele batch
         for laag in self.lagen:
             h, gewichten = laag(h)  # zelfde vorm erin als eruit
         scores = self.uit(h)  # (batch, T, vocab_size), pas hier naar vocab_size
@@ -116,17 +189,28 @@ def genereer(model, tokenizer, start, n_nieuw=40, generator=None):
     return tokenizer.decode(ids[0].tolist())
 
 
-def train_affiniteitsmodel(n_lagen, train_ids, test_ids, tokenizer, n_stappen=3000, eval_interval=300, seed=0):
-    """Traint een AffiniteitsModel met `n_lagen` lagen en houdt de loss bij."""
+def train_affiniteitsmodel(n_lagen, n_embed, train_ids, test_ids, tokenizer, lengte=20, gebruik_positie=True, gebruik_feedforward=False, losse_qk=False, losse_v=False, lr=1e-2, n_stappen=3000, eval_interval=300, seed=0):
+    """Traint een AffiniteitsModel met `n_lagen` lagen, `n_embed` dimensies en context `lengte`, en houdt de loss bij.
+
+    De leerrate volgt een cosine-schema: begint op `lr` en zakt geleidelijk
+    naar ~0 aan het einde van de training. Vroeg in training mag je grote
+    stappen zetten, maar tegen het einde (dicht bij een minimum) duwt een
+    grote stap je er juist weer overheen — dat zagen we terug als ruis en
+    niet-monotone loss bij een vaste hoge leerrate.
+    """
     torch.manual_seed(seed)
-    model = AffiniteitsModel(tokenizer.vocab_size, n_embed=12, n_lagen=n_lagen)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    model = AffiniteitsModel(
+        tokenizer.vocab_size, n_embed=n_embed, n_lagen=n_lagen,
+        gebruik_positie=gebruik_positie, gebruik_feedforward=gebruik_feedforward, losse_qk=losse_qk, losse_v=losse_v,
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_stappen)
 
     train_losses = []
     test_stappen, test_losses = [], []
-    print(f"\ntrainen n_lagen={n_lagen} ({n_stappen} stappen)...")
+    print(f"\ntrainen n_lagen={n_lagen} n_embed={n_embed} lengte={lengte} positie={gebruik_positie} feedforward={gebruik_feedforward} losse_qk={losse_qk} losse_v={losse_v} ({n_stappen} stappen)...")
     for stap in range(n_stappen):
-        x_b, y_b = maak_batch(train_ids, lengte=20, aantal=64)
+        x_b, y_b = maak_batch(train_ids, lengte=lengte, aantal=64)
         scores_b, _ = model(x_b)
         loss_b = F.cross_entropy(scores_b.reshape(-1, tokenizer.vocab_size), y_b.reshape(-1))
         train_losses.append(loss_b.item())
@@ -134,16 +218,18 @@ def train_affiniteitsmodel(n_lagen, train_ids, test_ids, tokenizer, n_stappen=30
         optimizer.zero_grad()
         loss_b.backward()
         optimizer.step()
+        scheduler.step()
 
         if stap % eval_interval == 0 or stap == n_stappen - 1:
             with torch.no_grad():
-                x_t, y_t = maak_batch(test_ids, lengte=20, aantal=256)
+                x_t, y_t = maak_batch(test_ids, lengte=lengte, aantal=256)
                 scores_t, _ = model(x_t)
                 loss_t = F.cross_entropy(scores_t.reshape(-1, tokenizer.vocab_size), y_t.reshape(-1))
             test_stappen.append(stap)
             test_losses.append(loss_t.item())
+            huidige_lr = optimizer.param_groups[0]["lr"]
             sample = genereer(model, tokenizer, start="Pinkeltje ", n_nieuw=40)
-            print(f"  stap {stap:>5}  train loss {loss_b.item():.3f}  test loss {loss_t.item():.3f}  sample: {sample!r}")
+            print(f"  stap {stap:>5}  train loss {loss_b.item():.3f}  test loss {loss_t.item():.3f}  lr {huidige_lr:.5f}  sample: {sample!r}")
 
     return model, train_losses, test_stappen, test_losses
 
@@ -208,27 +294,31 @@ if __name__ == "__main__":
     train_ids, test_ids = ids_alles[:split], ids_alles[split:]
     print(f"\ntrain: {len(train_ids)} tekens, test: {len(test_ids)} tekens")
 
-    # train meerdere modellen met een verschillend aantal lagen, om te vergelijken
-    n_lagen_opties = [1, 2, 3, 4]
+    # n_lagen=10, n_embed=20, positie-embedding + feedforward aan (met residu)
+    # nu vergelijken: alles-in-1 (gedeelde W, v=g) tegenover los QKV
+    varianten = {"alles-in-1": dict(losse_qk=False, losse_v=False), "QKV apart": dict(losse_qk=True, losse_v=True)}
     resultaten = {}
-    for n_lagen in n_lagen_opties:
+    for naam, opts in varianten.items():
         _, train_losses, test_stappen, test_losses = train_affiniteitsmodel(
-            n_lagen, train_ids, test_ids, tokenizer, n_stappen=3000, eval_interval=300,
+            n_lagen=10, n_embed=20, train_ids=train_ids, test_ids=test_ids, tokenizer=tokenizer,
+            lengte=20, gebruik_positie=True, gebruik_feedforward=True, **opts,
+            n_stappen=6000, eval_interval=300,
         )
-        resultaten[n_lagen] = (train_losses, test_stappen, test_losses)
+        resultaten[naam] = (train_losses, test_stappen, test_losses)
 
-    # plotje: train/test loss per aantal lagen, in dezelfde kleur per model
+    # plotje: train/test loss, alles-in-1 vs QKV apart, in dezelfde kleur per model
     plt.figure(figsize=(9, 6))
     kleuren = plt.cm.tab10.colors
-    for i, n_lagen in enumerate(n_lagen_opties):
-        train_losses, test_stappen, test_losses = resultaten[n_lagen]
+    for i, naam in enumerate(varianten):
+        train_losses, test_stappen, test_losses = resultaten[naam]
         kleur = kleuren[i % len(kleuren)]
         plt.plot(range(len(train_losses)), train_losses, color=kleur, alpha=0.25)
-        plt.plot(test_stappen, test_losses, color=kleur, marker="o", label=f"n_lagen={n_lagen}")
+        plt.plot(test_stappen, test_losses, color=kleur, marker="o", label=naam)
     plt.axhline(max_loss.item(), color="gray", linestyle="--", label="willekeurig gokken")
+    plt.ylim(1.5, 3.0)  # inzoomen: de instabiele piek bij stap 0 drukt anders alle verschil plat
     plt.xlabel("stap")
     plt.ylabel("loss")
-    plt.title("train/test loss per aantal lagen (vaag = train, stippen = test)")
+    plt.title("train/test loss: alles-in-1 vs QKV apart (residu, n_lagen=10, n_embed=20, vaag = train, stippen = test)")
     plt.legend()
     plt.tight_layout()
     plot_pad = Path(__file__).parent / "loss.png"
