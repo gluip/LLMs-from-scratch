@@ -34,6 +34,8 @@ N_STAPPEN = 3000
 EVAL_INTERVAL = 300
 SEED = 0
 
+N_EMBED_OPTIES = [20, 40]  # de knop die we in dit experiment vergelijken
+
 
 class CharTokenizer:
     """Tokenizer op karakterniveau: elk karakter wordt een integer."""
@@ -369,24 +371,32 @@ if __name__ == "__main__":
     train_ids, test_ids = ids_alles[:split], ids_alles[split:]
     print(f"\ntrain: {len(train_ids)} tekens, test: {len(test_ids)} tekens")
 
-    # één training met de vaste config hierboven
-    _, train_losses, test_stappen, test_losses = train_affiniteitsmodel(
-        n_lagen=N_LAGEN, n_embed=N_EMBED, train_ids=train_ids, test_ids=test_ids, tokenizer=tokenizer,
-        lengte=LENGTE, gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
-        losse_qk=LOSSE_QK, losse_v=LOSSE_V,
-        gebruik_layernorm=GEBRUIK_LAYERNORM, gebruik_masker=GEBRUIK_MASKER, dropout=DROPOUT,
-        aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
-        lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
-    )
+    # config hierboven vast, nu vergelijken: embedding-grootte
+    # (eerder getest met de primitieve architectuur, nu opnieuw met residu/QKV/LayerNorm)
+    resultaten = {}
+    for n_embed in N_EMBED_OPTIES:
+        _, train_losses, test_stappen, test_losses = train_affiniteitsmodel(
+            n_lagen=N_LAGEN, n_embed=n_embed, train_ids=train_ids, test_ids=test_ids, tokenizer=tokenizer,
+            lengte=LENGTE, gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
+            losse_qk=LOSSE_QK, losse_v=LOSSE_V,
+            gebruik_layernorm=GEBRUIK_LAYERNORM, gebruik_masker=GEBRUIK_MASKER, dropout=DROPOUT,
+            aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
+            lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
+        )
+        resultaten[n_embed] = (train_losses, test_stappen, test_losses)
 
-    # plotje: train/test loss over de training heen
+    # plotje: train/test loss per embedding-grootte, in dezelfde kleur per model
     plt.figure(figsize=(9, 6))
-    plt.plot(range(len(train_losses)), train_losses, alpha=0.3, label="train")
-    plt.plot(test_stappen, test_losses, marker="o", label="test")
+    kleuren = plt.cm.tab10.colors
+    for i, n_embed in enumerate(N_EMBED_OPTIES):
+        train_losses, test_stappen, test_losses = resultaten[n_embed]
+        kleur = kleuren[i % len(kleuren)]
+        plt.plot(range(len(train_losses)), train_losses, color=kleur, alpha=0.25)
+        plt.plot(test_stappen, test_losses, color=kleur, marker="o", label=f"n_embed={n_embed}")
     plt.axhline(max_loss.item(), color="gray", linestyle="--", label="willekeurig gokken")
     plt.xlabel("stap")
     plt.ylabel("loss")
-    plt.title(f"train/test loss (n_lagen={N_LAGEN}, n_embed={N_EMBED}, lengte={LENGTE}, vaag = train, stippen = test)")
+    plt.title(f"train/test loss per embedding-grootte (n_lagen={N_LAGEN}, lengte={LENGTE}, vaag = train, stippen = test)")
     plt.legend()
     plt.tight_layout()
     plot_pad = Path(__file__).parent / "loss.png"
