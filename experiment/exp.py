@@ -12,6 +12,11 @@ import torch.nn.functional as F
 # ---------------------------------------------------------------------------
 # Config: alle instelbare knoppen op één plek
 # ---------------------------------------------------------------------------
+APPARAAT = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Alles (data, model, batches) staat op APPARAAT. Op de CPU is elke stap een
+# aparte matrixvermenigvuldiging op een paar cores; op de GPU gaan de 64 stukjes
+# van een batch tegelijk. Zonder dit stond alles op de CPU en lag de GPU stil.
+
 DATA_MAP = Path(__file__).parent / "data"
 TEKST_BESTANDEN = [        # schoongemaakt door schoonmaak.py; ruwe downloads staan in data/ruw
     "pinkeltje.txt",
@@ -75,12 +80,18 @@ def maak_batch(ids, lengte=20, aantal=10, generator=None):
       x = de karakters zelf
       y = dezelfde karakters, één positie opgeschoven (het "volgende" karakter)
     Zo hoort bij elke positie i in x meteen het juiste antwoord y[i].
+
+    x en y komen terug op hetzelfde apparaat als `ids`. De startposities worden
+    op de CPU getrokken (zodat een meegegeven CPU-generator blijft werken en de
+    trekking reproduceerbaar hetzelfde is als voorheen), en daarna in één
+    gather-actie opgehaald in plaats van met `aantal` losse slices — dat scheelt
+    op de GPU honderden kleine kopieën per stap.
     """
     # we hebben lengte+1 tokens nodig per stukje: lengte input + 1 extra target
     starts = torch.randint(0, len(ids) - lengte, (aantal,), generator=generator)
-    x = torch.stack([ids[s:s + lengte] for s in starts])
-    y = torch.stack([ids[s + 1:s + lengte + 1] for s in starts])
-    return x, y
+    index = starts.unsqueeze(1) + torch.arange(lengte + 1)  # (aantal, lengte+1)
+    brok = ids[index.to(ids.device)]
+    return brok[:, :-1], brok[:, 1:]
 
 
 class AffiniteitsLaag(nn.Module):
@@ -272,7 +283,29 @@ class AffiniteitsModel(nn.Module):
         return scores, gewichten  # gewichten van de laatste laag, voor inspectie
 
 
-def genereer(model, tokenizer, start, n_nieuw=40, lengte=LENGTE, generator=None):
+def loss_per_positie(model, test_ids, tokenizer, lengte, herhalingen=20, aantal=256, seed=1234):
+    """Gemiddelde loss op elke positie in het venster.
+
+    Positie 0 heeft nul karakters context, positie t heeft er t. Zo zie je
+    rechtstreeks hoeveel elk extra karakter context nog waard is. Komt terug
+    als CPU-tensor van lengte `lengte`.
+    """
+    model.eval()
+    g = torch.Generator().manual_seed(seed)  # CPU-generator: maak_batch trekt de starts op de CPU
+    som = torch.zeros(lengte, device=test_ids.device)
+    for _ in range(herhalingen):
+        x, y = maak_batch(test_ids, lengte, aantal, g)
+        with torch.no_grad():
+            s, _ = model(x)
+        pp = F.cross_entropy(s.reshape(-1, tokenizer.vocab_size), y.reshape(-1),
+                             reduction="none").view(y.shape)
+        som += pp.mean(dim=0)
+    model.train()
+    return (som / herhalingen).cpu()  # naar de CPU, dan zijn de resultaten overal te laden
+
+
+def genereer(model, tokenizer, start, n_nieuw=40, lengte=LENGTE, generator=None,
+             temperatuur=1.0):
     """Genereer karakter voor karakter verder op `start`, door telkens uit de
     voorspelde kansverdeling te samplen (niet steeds de meest waarschijnlijke).
 
@@ -280,14 +313,25 @@ def genereer(model, tokenizer, start, n_nieuw=40, lengte=LENGTE, generator=None)
     model op getraind is. Zonder die afkapping groeit de invoer door tot voorbij
     `lengte`, en dan gebruikt het model rijen van pos_embed die tijdens training
     nooit aan bod kwamen — die staan dus nog op hun willekeurige startwaarde.
+
+    `temperatuur` deelt de scores voor de softmax. Onder 1 wordt de verdeling
+    spitser (het model kiest vaker zijn favoriet: braver, maar herhaalt zichzelf
+    sneller), boven 1 vlakker (meer variatie, meer onzin). Bij 1.0 sample je uit
+    de verdeling zoals het model hem geleerd heeft.
     """
     model.eval()
-    ids = torch.tensor([tokenizer.encode(start)], dtype=torch.long)  # (1, T)
+    apparaat = next(model.parameters()).device  # volg het model, niet APPARAAT
+    ids = torch.tensor([tokenizer.encode(start)], dtype=torch.long, device=apparaat)  # (1, T)
     with torch.no_grad():
         for _ in range(n_nieuw):
             scores, _ = model(ids[:, -lengte:])
-            kansen = torch.softmax(scores[0, -1], dim=-1)  # kansen voor het laatste teken
-            volgend = torch.multinomial(kansen, num_samples=1, generator=generator)
+            kansen = torch.softmax(scores[0, -1] / temperatuur, dim=-1)  # kansen voor het laatste teken
+            if generator is not None and generator.device != kansen.device:
+                # een CPU-generator kan niet uit een CUDA-tensor trekken; even
+                # terug naar de CPU zodat de seed z'n werk blijft doen
+                volgend = torch.multinomial(kansen.cpu(), num_samples=1, generator=generator).to(apparaat)
+            else:
+                volgend = torch.multinomial(kansen, num_samples=1, generator=generator)
             ids = torch.cat([ids, volgend.unsqueeze(0)], dim=1)
     model.train()
     return tokenizer.decode(ids[0].tolist())
@@ -300,6 +344,7 @@ def train_affiniteitsmodel(
     n_koppen=N_KOPPEN, uit_projectie=UIT_PROJECTIE,
     aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
     lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
+    apparaat=None,
 ):
     """Traint een AffiniteitsModel met `n_lagen` lagen, `n_embed` dimensies en context `lengte`, en houdt de loss bij.
 
@@ -309,13 +354,17 @@ def train_affiniteitsmodel(
     grote stap je er juist weer overheen — dat zagen we terug als ruis en
     niet-monotone loss bij een vaste hoge leerrate.
     """
-    torch.manual_seed(seed)
+    apparaat = torch.device(apparaat) if apparaat is not None else APPARAAT
+    torch.manual_seed(seed)  # model wordt op de CPU geïnitialiseerd en daarna verplaatst,
+                             # dus dezelfde seed geeft dezelfde startgewichten als voorheen
     model = AffiniteitsModel(
         tokenizer.vocab_size, n_embed=n_embed, n_lagen=n_lagen,
         gebruik_positie=gebruik_positie, gebruik_feedforward=gebruik_feedforward, losse_qk=losse_qk, losse_v=losse_v,
         gebruik_layernorm=gebruik_layernorm, gebruik_masker=gebruik_masker, dropout=dropout,
         n_koppen=n_koppen, uit_projectie=uit_projectie, max_lengte=lengte,
-    )
+    ).to(apparaat)
+    train_ids = train_ids.to(apparaat)
+    test_ids = test_ids.to(apparaat)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_stappen)
 
@@ -324,12 +373,14 @@ def train_affiniteitsmodel(
     train_losses = []
     test_stappen, test_losses = [], []
     n_par = sum(p.numel() for p in model.parameters())
-    print(f"\ntrainen n_lagen={n_lagen} n_embed={n_embed} n_koppen={n_koppen} lengte={lengte} ff_factor={FF_FACTOR} dropout={dropout} ({n_par} parameters, {n_stappen} stappen)...")
+    print(f"\ntrainen n_lagen={n_lagen} n_embed={n_embed} n_koppen={n_koppen} lengte={lengte} ff_factor={FF_FACTOR} dropout={dropout} ({n_par} parameters, {n_stappen} stappen) op {apparaat}...")
     for stap in range(n_stappen):
         x_b, y_b = maak_batch(train_ids, lengte=lengte, aantal=aantal_train)
         scores_b, _ = model(x_b)
         loss_b = F.cross_entropy(scores_b.reshape(-1, tokenizer.vocab_size), y_b.reshape(-1))
-        train_losses.append(loss_b.item())
+        # .item() zou hier elke stap op de GPU wachten; de tensor bewaren en pas
+        # aan het eind uitlezen scheelt een synchronisatie per stap
+        train_losses.append(loss_b.detach())
 
         optimizer.zero_grad()
         loss_b.backward()
@@ -349,7 +400,7 @@ def train_affiniteitsmodel(
             sample = genereer(model, tokenizer, start=genereer_start, n_nieuw=40, lengte=lengte)
             print(f"  stap {stap:>5}  train loss {loss_b.item():.3f}  test loss {loss_t.item():.3f}  lr {huidige_lr:.5f}  sample: {sample!r}")
 
-    return model, train_losses, test_stappen, test_losses
+    return model, [l.item() for l in train_losses], test_stappen, test_losses
 
 
 if __name__ == "__main__":
@@ -454,7 +505,8 @@ if __name__ == "__main__":
     # model bewaren, zodat je kunt prompten zonder opnieuw te trainen (zie praat.py)
     model_pad = Path(__file__).parent / "model.pt"
     torch.save({
-        "state_dict": model.state_dict(),
+        # naar de CPU, zodat het bestand ook te laden is op een machine zonder GPU
+        "state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
         "chars": tokenizer.chars,
         "config": dict(n_embed=N_EMBED, n_lagen=N_LAGEN, n_koppen=N_KOPPEN,
                        gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
