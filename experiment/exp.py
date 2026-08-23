@@ -12,29 +12,40 @@ import torch.nn.functional as F
 # ---------------------------------------------------------------------------
 # Config: alle instelbare knoppen op één plek
 # ---------------------------------------------------------------------------
-TEKST_PAD = Path(__file__).parent / "pinkeltje_schoon.txt"
+DATA_MAP = Path(__file__).parent / "data"
+TEKST_BESTANDEN = [        # schoongemaakt door schoonmaak.py; ruwe downloads staan in data/ruw
+    "pinkeltje.txt",
+    "willem-van-oranje.txt",
+    "boek-van-nu.txt",
+]
 TRAIN_FRACTIE = 0.9        # aandeel van de tekst dat train wordt, de rest is test
 
-LENGTE = 20                 # context length; 5, 40 en 60 gaven allemaal dezelfde loss — 20 is genoeg
+LENGTE = 64                 # context length. Bij 130k karakters gaven 5/20/40/60 dezelfde loss en
+                            # leek 20 genoeg; dat was een eigenschap van de kleine dataset, niet van
+                            # de taal. Bij 1,8M karakters is dit de waardevolste knop van allemaal:
+                            # 20 -> 64 gaf 0,106 nats, meer dan het verdrievoudigen van de parameters.
 BATCH_AANTAL = 64           # stukjes per trainings-batch
 TEST_BATCH_AANTAL = 256     # stukjes per test-batch (groter = stabielere meting)
 
-N_EMBED = 20                 # dimensies per karakter-embedding
+N_EMBED = 80                 # dimensies per karakter-embedding; 128 met 6 lagen ging juist overfitten
 N_LAGEN = 5                    # 10 gaf maar 0,025 nats winst voor 2x de rekentijd — niet de moeite waard
+N_KOPPEN = 4                   # multi-head: n_embed opgesplitst in 4 aparte attention-koppen
+FF_FACTOR = 4.0                # feedforward verbreedt naar 4x n_embed (was /4: dat kostte kwaliteit)
 GEBRUIK_POSITIE = True        # positie-embedding: weet het model hoe ver terug iets stond?
-GEBRUIK_FEEDFORWARD = True    # feedforward-bottleneck-laag na elke attention-laag
+GEBRUIK_FEEDFORWARD = True    # feedforward-laag na elke attention-laag
+UIT_PROJECTIE = True           # W_o: mengt de koppen na afloop weer met elkaar
 LOSSE_QK = True                # aparte Q- en K-matrix i.p.v. één gedeelde W
 LOSSE_V = True                 # aparte V-matrix i.p.v. V = Q
 GEBRUIK_LAYERNORM = True        # normaliseer h vlak voor elke sublaag
 GEBRUIK_MASKER = True           # causaal masker: nooit vooruitkijken (altijd aan houden)
-DROPOUT = 0.0                   # geen overfitting-probleem op deze dataset om tegen te vechten
+DROPOUT = 0.0                   # zat op 0,2 tegen overfitting op de kleine dataset. Met 1,8M
+                                # karakters onderfit dit model juist; dropout eruit gaf 0,115 nats.
 
 LEERRATE = 1e-2               # startpunt van de cosine-decay
-N_STAPPEN = 3000
-EVAL_INTERVAL = 300
+N_STAPPEN = 18000             # 6000 stappen gingen 59x door de oude dataset maar nog geen 5x door
+                              # deze; 18000 herstelt dat en gaf 0,056 nats.
+EVAL_INTERVAL = 500
 SEED = 0
-
-N_EMBED_OPTIES = [20, 40]  # de knop die we in dit experiment vergelijken
 
 
 class CharTokenizer:
@@ -108,11 +119,22 @@ class AffiniteitsLaag(nn.Module):
     niet blind op één specifieke eerdere letter te leunen, maar het patroon
     over meerdere mogelijke letters te leren herkennen — minder kans om de
     trainingsdata letterlijk te onthouden.
+
+    Met `n_koppen > 1` wordt n_embed opgesplitst in evenveel losse koppen, die
+    elk hun eigen affiniteit berekenen over hun eigen stukje van de vector. Zo
+    kan de ene kop bijvoorbeeld op de vorige letter letten en de andere op het
+    begin van het woord, in plaats van dat één verdeling alles moet doen.
+    `uit_projectie` (W_o) mengt de koppen daarna weer met elkaar — zonder die
+    stap blijven ze los van elkaar staan en levert opsplitsen weinig op.
     """
 
-    def __init__(self, n_embed, losse_qk=False, losse_v=False, gebruik_masker=True, dropout=0.0):
+    def __init__(self, n_embed, losse_qk=False, losse_v=False, gebruik_masker=True, dropout=0.0,
+                 n_koppen=1, uit_projectie=False):
         super().__init__()
+        assert n_embed % n_koppen == 0, "n_embed moet deelbaar zijn door n_koppen"
         self.n_embed = n_embed
+        self.n_koppen = n_koppen
+        self.kop_dim = n_embed // n_koppen
         self.losse_qk = losse_qk
         self.gebruik_masker = gebruik_masker
         self.dropout = nn.Dropout(dropout)
@@ -122,42 +144,58 @@ class AffiniteitsLaag(nn.Module):
         else:
             self.W = nn.Linear(n_embed, n_embed, bias=False)  # de ene gedeelde matrix
         self.V = nn.Linear(n_embed, n_embed, bias=False) if losse_v else None
+        self.uit_proj = nn.Linear(n_embed, n_embed) if uit_projectie else None
+
+    def _splits(self, t):
+        """(batch, T, n_embed) -> (batch, n_koppen, T, kop_dim)."""
+        B, T, _ = t.shape
+        return t.view(B, T, self.n_koppen, self.kop_dim).transpose(1, 2)
 
     def forward(self, h):
         # h: (batch, T, n_embed) -> ook weer (batch, T, n_embed), dus stackbaar
-        T = h.shape[1]
+        B, T, C = h.shape
         if self.losse_qk:
-            q = self.Q(h)
-            k = self.K(h)
-            affiniteit = q @ k.transpose(-2, -1)  # (batch, T, T), inproduct query x key
-            basis = q  # terugvaloptie voor v, als losse_v uitstaat
+            q, k = self._splits(self.Q(h)), self._splits(self.K(h))
+            basis = self.Q(h)  # terugvaloptie voor v, als losse_v uitstaat
         else:
-            q = k = self.W(h)               # (batch, T, n_embed), geprojecteerd
-            affiniteit = q @ k.transpose(-2, -1)           # (batch, T, T), inproduct per paar
-            basis = q
-        affiniteit = affiniteit / self.n_embed ** 0.5   # schaling, zoals bij echte attention
+            gedeeld = self.W(h)             # (batch, T, n_embed), geprojecteerd
+            q = k = self._splits(gedeeld)
+            basis = gedeeld
+        affiniteit = q @ k.transpose(-2, -1)            # (batch, n_koppen, T, T)
+        affiniteit = affiniteit / self.kop_dim ** 0.5   # schaling, per kop
 
         if self.gebruik_masker:
-            masker = torch.triu(torch.ones(T, T, dtype=torch.bool), diagonal=1)
+            masker = torch.triu(torch.ones(T, T, dtype=torch.bool, device=h.device), diagonal=1)
             affiniteit = affiniteit.masked_fill(masker, float("-inf"))  # niet vooruitkijken
 
         gewichten = torch.softmax(affiniteit, dim=-1)  # per rij: kansen die optellen tot 1
-        v = self.V(h) if self.V is not None else basis  # losse matrix op h, of terugval
-        output = self.dropout(gewichten) @ v  # (batch, T, n_embed); dropout alleen voor de output-berekening
-        return output, gewichten  # ongewijzigde gewichten teruggeven, voor inspectie
+        v = self._splits(self.V(h) if self.V is not None else basis)
+        output = self.dropout(gewichten) @ v            # (batch, n_koppen, T, kop_dim)
+        output = output.transpose(1, 2).contiguous().view(B, T, C)  # koppen weer aan elkaar
+        if self.uit_proj is not None:
+            output = self.uit_proj(output)
+        return output, gewichten[:, 0]  # gewichten van de eerste kop, voor inspectie
 
 
 class FeedForwardLaag(nn.Module):
-    """Verlaagt de dimensie (delen door 4), niet-lineariteit, en weer terug naar
-    n_embed. Ook stackbaar: (batch, T, n_embed) -> (batch, T, n_embed). Werkt
-    per positie apart (geen menging tussen posities, dat doet de attention-laag)."""
+    """Verbreedt de dimensie (maal FF_FACTOR), niet-lineariteit, en weer terug
+    naar n_embed. Ook stackbaar: (batch, T, n_embed) -> (batch, T, n_embed).
+    Werkt per positie apart (geen menging tussen posities, dat doet de
+    attention-laag).
 
-    def __init__(self, n_embed, dropout=0.0):
+    Let op de richting: dit is een *expansie*, geen bottleneck. We hadden hem
+    eerst andersom (n_embed // 4) en dat kostte meetbaar kwaliteit — het model
+    moest elke positie door een veel te nauw poortje persen. Breed maken en
+    daarna weer terugbrengen geeft de niet-lineariteit ruimte om te werken.
+    """
+
+    def __init__(self, n_embed, dropout=0.0, factor=FF_FACTOR):
         super().__init__()
+        binnen = max(1, int(round(n_embed * factor)))
         self.net = nn.Sequential(
-            nn.Linear(n_embed, n_embed // 4),
+            nn.Linear(n_embed, binnen),
             nn.ReLU(),
-            nn.Linear(n_embed // 4, n_embed),
+            nn.Linear(binnen, n_embed),
             nn.Dropout(dropout),
         )
 
@@ -182,9 +220,9 @@ class Blok(nn.Module):
     leidt — zoals we terugzagen als een hoge loss bij stap 0.
     """
 
-    def __init__(self, n_embed, gebruik_feedforward=False, losse_qk=False, losse_v=False, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0):
+    def __init__(self, n_embed, gebruik_feedforward=False, losse_qk=False, losse_v=False, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0, n_koppen=1, uit_projectie=False):
         super().__init__()
-        self.attentie = AffiniteitsLaag(n_embed, losse_qk=losse_qk, losse_v=losse_v, gebruik_masker=gebruik_masker, dropout=dropout)
+        self.attentie = AffiniteitsLaag(n_embed, losse_qk=losse_qk, losse_v=losse_v, gebruik_masker=gebruik_masker, dropout=dropout, n_koppen=n_koppen, uit_projectie=uit_projectie)
         self.feedforward = FeedForwardLaag(n_embed, dropout=dropout) if gebruik_feedforward else None
         self.ln1 = nn.LayerNorm(n_embed) if gebruik_layernorm else None
         self.ln2 = nn.LayerNorm(n_embed) if (gebruik_layernorm and gebruik_feedforward) else None
@@ -209,7 +247,7 @@ class AffiniteitsModel(nn.Module):
     kan leren meewegen.
     """
 
-    def __init__(self, vocab_size, n_embed=12, n_lagen=1, gebruik_positie=True, gebruik_feedforward=False, losse_qk=False, losse_v=False, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0, max_lengte=128):
+    def __init__(self, vocab_size, n_embed=12, n_lagen=1, gebruik_positie=True, gebruik_feedforward=False, losse_qk=False, losse_v=False, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0, n_koppen=1, uit_projectie=False, max_lengte=128):
         super().__init__()
         self.gebruik_positie = gebruik_positie
         self.embed = nn.Embedding(vocab_size, n_embed)
@@ -217,7 +255,7 @@ class AffiniteitsModel(nn.Module):
             self.pos_embed = nn.Embedding(max_lengte, n_embed)
         self.embed_dropout = nn.Dropout(dropout)
         self.lagen = nn.ModuleList([
-            Blok(n_embed, gebruik_feedforward, losse_qk, losse_v, gebruik_layernorm, gebruik_masker, dropout) for _ in range(n_lagen)
+            Blok(n_embed, gebruik_feedforward, losse_qk, losse_v, gebruik_layernorm, gebruik_masker, dropout, n_koppen, uit_projectie) for _ in range(n_lagen)
         ])
         self.uit = nn.Linear(n_embed, vocab_size)  # enige plek die naar vocab_size gaat
 
@@ -259,6 +297,7 @@ def train_affiniteitsmodel(
     n_lagen, n_embed, train_ids, test_ids, tokenizer, lengte=LENGTE,
     gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
     losse_qk=LOSSE_QK, losse_v=LOSSE_V, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0,
+    n_koppen=N_KOPPEN, uit_projectie=UIT_PROJECTIE,
     aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
     lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
 ):
@@ -275,6 +314,7 @@ def train_affiniteitsmodel(
         tokenizer.vocab_size, n_embed=n_embed, n_lagen=n_lagen,
         gebruik_positie=gebruik_positie, gebruik_feedforward=gebruik_feedforward, losse_qk=losse_qk, losse_v=losse_v,
         gebruik_layernorm=gebruik_layernorm, gebruik_masker=gebruik_masker, dropout=dropout,
+        n_koppen=n_koppen, uit_projectie=uit_projectie,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_stappen)
@@ -283,7 +323,8 @@ def train_affiniteitsmodel(
 
     train_losses = []
     test_stappen, test_losses = [], []
-    print(f"\ntrainen n_lagen={n_lagen} n_embed={n_embed} lengte={lengte} positie={gebruik_positie} feedforward={gebruik_feedforward} losse_qk={losse_qk} losse_v={losse_v} layernorm={gebruik_layernorm} masker={gebruik_masker} dropout={dropout} ({n_stappen} stappen)...")
+    n_par = sum(p.numel() for p in model.parameters())
+    print(f"\ntrainen n_lagen={n_lagen} n_embed={n_embed} n_koppen={n_koppen} lengte={lengte} ff_factor={FF_FACTOR} dropout={dropout} ({n_par} parameters, {n_stappen} stappen)...")
     for stap in range(n_stappen):
         x_b, y_b = maak_batch(train_ids, lengte=lengte, aantal=aantal_train)
         scores_b, _ = model(x_b)
@@ -312,9 +353,13 @@ def train_affiniteitsmodel(
 
 
 if __name__ == "__main__":
-    tekst = TEKST_PAD.read_text(encoding="utf-8")
+    # elk boek apart inlezen: de train/test-splitsing moet per boek gebeuren
+    boeken = [(naam, (DATA_MAP / naam).read_text(encoding="utf-8")) for naam in TEKST_BESTANDEN]
+    tekst = "".join(t for _, t in boeken)
     tokenizer = CharTokenizer(tekst)
 
+    for naam, t in boeken:
+        print(f"  {naam:24s} {len(t):>9,d} karakters")
     print(f"aantal karakters: {len(tekst)}")
     print(f"vocab size:       {tokenizer.vocab_size}")
     print(f"vocabulaire:      {''.join(tokenizer.chars)!r}")
@@ -346,9 +391,9 @@ if __name__ == "__main__":
         volgende = tokenizer.int_naar_char[y[0, i].item()]
         print(f"  {context!r:>28}  ->  {volgende!r}")
 
-    # affiniteitsmatrix: één gedeelde matrix i.p.v. losse Q/K, per letterpaar
+    # affiniteitsmatrix van één ongetrainde laag, om te zien waar posities op letten
     print("\naffiniteits-model (ongetraind, n_embed=12, n_lagen=1) op het eerste stukje:")
-    aff_model = AffiniteitsModel(tokenizer.vocab_size, n_embed=12, n_lagen=1)
+    aff_model = AffiniteitsModel(tokenizer.vocab_size, n_embed=12, n_lagen=1, n_koppen=1)
     scores, gewichten = aff_model(x[:1])  # alleen het eerste stukje
     letters = [tokenizer.int_naar_char[t] for t in x[0].tolist()]
     for i in range(1, len(letters)):
@@ -367,38 +412,54 @@ if __name__ == "__main__":
     print(f"loss op het eerste stukje (ongetraind): {loss.item():.3f}  (willekeurig gokken: {max_loss:.3f})")
 
     # train/test-split: nooit trainen en meten op dezelfde tekst
-    split = int(TRAIN_FRACTIE * len(ids_alles))
-    train_ids, test_ids = ids_alles[:split], ids_alles[split:]
+    # Van elk boek apart de laatste 10% als test nemen. Zouden we de boeken eerst
+    # aan elkaar plakken en dan de laatste 10% pakken, dan bestond de test-set
+    # volledig uit het laatste boek — en dat is 73% van de tekst en een heel
+    # ander soort Nederlands. Dan meet je niet meer of het model de rest kan.
+    train_delen, test_delen = [], []
+    for naam, t in boeken:
+        deel = torch.tensor(tokenizer.encode(t), dtype=torch.long)
+        split = int(TRAIN_FRACTIE * len(deel))
+        train_delen.append(deel[:split])
+        test_delen.append(deel[split:])
+    train_ids = torch.cat(train_delen)
+    test_ids = torch.cat(test_delen)
     print(f"\ntrain: {len(train_ids)} tekens, test: {len(test_ids)} tekens")
 
-    # config hierboven vast, nu vergelijken: embedding-grootte
-    # (eerder getest met de primitieve architectuur, nu opnieuw met residu/QKV/LayerNorm)
-    resultaten = {}
-    for n_embed in N_EMBED_OPTIES:
-        _, train_losses, test_stappen, test_losses = train_affiniteitsmodel(
-            n_lagen=N_LAGEN, n_embed=n_embed, train_ids=train_ids, test_ids=test_ids, tokenizer=tokenizer,
-            lengte=LENGTE, gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
-            losse_qk=LOSSE_QK, losse_v=LOSSE_V,
-            gebruik_layernorm=GEBRUIK_LAYERNORM, gebruik_masker=GEBRUIK_MASKER, dropout=DROPOUT,
-            aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
-            lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
-        )
-        resultaten[n_embed] = (train_losses, test_stappen, test_losses)
+    # één training met de vaste config hierboven
+    model, train_losses, test_stappen, test_losses = train_affiniteitsmodel(
+        n_lagen=N_LAGEN, n_embed=N_EMBED, train_ids=train_ids, test_ids=test_ids, tokenizer=tokenizer,
+        lengte=LENGTE, gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
+        losse_qk=LOSSE_QK, losse_v=LOSSE_V,
+        gebruik_layernorm=GEBRUIK_LAYERNORM, gebruik_masker=GEBRUIK_MASKER, dropout=DROPOUT,
+        n_koppen=N_KOPPEN, uit_projectie=UIT_PROJECTIE,
+        aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
+        lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
+    )
 
-    # plotje: train/test loss per embedding-grootte, in dezelfde kleur per model
+    # plotje: train/test loss over de training heen
     plt.figure(figsize=(9, 6))
-    kleuren = plt.cm.tab10.colors
-    for i, n_embed in enumerate(N_EMBED_OPTIES):
-        train_losses, test_stappen, test_losses = resultaten[n_embed]
-        kleur = kleuren[i % len(kleuren)]
-        plt.plot(range(len(train_losses)), train_losses, color=kleur, alpha=0.25)
-        plt.plot(test_stappen, test_losses, color=kleur, marker="o", label=f"n_embed={n_embed}")
+    plt.plot(range(len(train_losses)), train_losses, alpha=0.3, label="train")
+    plt.plot(test_stappen, test_losses, marker="o", label="test")
     plt.axhline(max_loss.item(), color="gray", linestyle="--", label="willekeurig gokken")
     plt.xlabel("stap")
     plt.ylabel("loss")
-    plt.title(f"train/test loss per embedding-grootte (n_lagen={N_LAGEN}, lengte={LENGTE}, vaag = train, stippen = test)")
+    plt.title(f"train/test loss (n_embed={N_EMBED}, n_lagen={N_LAGEN}, n_koppen={N_KOPPEN}, dropout={DROPOUT})")
     plt.legend()
     plt.tight_layout()
     plot_pad = Path(__file__).parent / "loss.png"
     plt.savefig(plot_pad)
     print(f"\nplot opgeslagen: {plot_pad}")
+
+    # model bewaren, zodat je kunt prompten zonder opnieuw te trainen (zie praat.py)
+    model_pad = Path(__file__).parent / "model.pt"
+    torch.save({
+        "state_dict": model.state_dict(),
+        "chars": tokenizer.chars,
+        "config": dict(n_embed=N_EMBED, n_lagen=N_LAGEN, n_koppen=N_KOPPEN,
+                       gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
+                       losse_qk=LOSSE_QK, losse_v=LOSSE_V, gebruik_layernorm=GEBRUIK_LAYERNORM,
+                       gebruik_masker=GEBRUIK_MASKER, uit_projectie=UIT_PROJECTIE, dropout=0.0),
+        "lengte": LENGTE,
+    }, model_pad)
+    print(f"model opgeslagen:  {model_pad}")
