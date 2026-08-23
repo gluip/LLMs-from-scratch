@@ -15,7 +15,7 @@ import torch.nn.functional as F
 TEKST_PAD = Path(__file__).parent / "pinkeltje_schoon.txt"
 TRAIN_FRACTIE = 0.9        # aandeel van de tekst dat train wordt, de rest is test
 
-LENGTE = 20                 # context length: aantal karakters dat het model terugkijkt
+LENGTE = 20                 # context length; 5, 40 en 60 gaven allemaal dezelfde loss — 20 is genoeg
 BATCH_AANTAL = 64           # stukjes per trainings-batch
 TEST_BATCH_AANTAL = 256     # stukjes per test-batch (groter = stabielere meting)
 
@@ -232,14 +232,20 @@ class AffiniteitsModel(nn.Module):
         return scores, gewichten  # gewichten van de laatste laag, voor inspectie
 
 
-def genereer(model, tokenizer, start, n_nieuw=40, generator=None):
+def genereer(model, tokenizer, start, n_nieuw=40, lengte=LENGTE, generator=None):
     """Genereer karakter voor karakter verder op `start`, door telkens uit de
-    voorspelde kansverdeling te samplen (niet steeds de meest waarschijnlijke)."""
+    voorspelde kansverdeling te samplen (niet steeds de meest waarschijnlijke).
+
+    De context wordt afgekapt op de laatste `lengte` tokens: dat is waar het
+    model op getraind is. Zonder die afkapping groeit de invoer door tot voorbij
+    `lengte`, en dan gebruikt het model rijen van pos_embed die tijdens training
+    nooit aan bod kwamen — die staan dus nog op hun willekeurige startwaarde.
+    """
     model.eval()
     ids = torch.tensor([tokenizer.encode(start)], dtype=torch.long)  # (1, T)
     with torch.no_grad():
         for _ in range(n_nieuw):
-            scores, _ = model(ids)
+            scores, _ = model(ids[:, -lengte:])
             kansen = torch.softmax(scores[0, -1], dim=-1)  # kansen voor het laatste teken
             volgend = torch.multinomial(kansen, num_samples=1, generator=generator)
             ids = torch.cat([ids, volgend.unsqueeze(0)], dim=1)
@@ -297,7 +303,7 @@ def train_affiniteitsmodel(
             test_stappen.append(stap)
             test_losses.append(loss_t.item())
             huidige_lr = optimizer.param_groups[0]["lr"]
-            sample = genereer(model, tokenizer, start=genereer_start, n_nieuw=40)
+            sample = genereer(model, tokenizer, start=genereer_start, n_nieuw=40, lengte=lengte)
             print(f"  stap {stap:>5}  train loss {loss_b.item():.3f}  test loss {loss_t.item():.3f}  lr {huidige_lr:.5f}  sample: {sample!r}")
 
     return model, train_losses, test_stappen, test_losses
@@ -363,31 +369,24 @@ if __name__ == "__main__":
     train_ids, test_ids = ids_alles[:split], ids_alles[split:]
     print(f"\ntrain: {len(train_ids)} tekens, test: {len(test_ids)} tekens")
 
-    # config hierboven (N_LAGEN=5, N_EMBED, LENGTE, ...) vast, nu opnieuw: alles-in-1 vs QKV apart
-    varianten = {"alles-in-1": dict(losse_qk=False, losse_v=False), "QKV apart": dict(losse_qk=True, losse_v=True)}
-    resultaten = {}
-    for naam, opts in varianten.items():
-        _, train_losses, test_stappen, test_losses = train_affiniteitsmodel(
-            n_lagen=N_LAGEN, n_embed=N_EMBED, train_ids=train_ids, test_ids=test_ids, tokenizer=tokenizer,
-            lengte=LENGTE, gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
-            gebruik_layernorm=GEBRUIK_LAYERNORM, gebruik_masker=GEBRUIK_MASKER, dropout=DROPOUT, **opts,
-            aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
-            lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
-        )
-        resultaten[naam] = (train_losses, test_stappen, test_losses)
+    # één training met de vaste config hierboven
+    _, train_losses, test_stappen, test_losses = train_affiniteitsmodel(
+        n_lagen=N_LAGEN, n_embed=N_EMBED, train_ids=train_ids, test_ids=test_ids, tokenizer=tokenizer,
+        lengte=LENGTE, gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
+        losse_qk=LOSSE_QK, losse_v=LOSSE_V,
+        gebruik_layernorm=GEBRUIK_LAYERNORM, gebruik_masker=GEBRUIK_MASKER, dropout=DROPOUT,
+        aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
+        lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
+    )
 
-    # plotje: train/test loss, alles-in-1 vs QKV apart, in dezelfde kleur per model
+    # plotje: train/test loss over de training heen
     plt.figure(figsize=(9, 6))
-    kleuren = plt.cm.tab10.colors
-    for i, naam in enumerate(varianten):
-        train_losses, test_stappen, test_losses = resultaten[naam]
-        kleur = kleuren[i % len(kleuren)]
-        plt.plot(range(len(train_losses)), train_losses, color=kleur, alpha=0.25)
-        plt.plot(test_stappen, test_losses, color=kleur, marker="o", label=naam)
+    plt.plot(range(len(train_losses)), train_losses, alpha=0.3, label="train")
+    plt.plot(test_stappen, test_losses, marker="o", label="test")
     plt.axhline(max_loss.item(), color="gray", linestyle="--", label="willekeurig gokken")
     plt.xlabel("stap")
     plt.ylabel("loss")
-    plt.title(f"train/test loss: alles-in-1 vs QKV apart (n_lagen={N_LAGEN}, n_embed={N_EMBED}, vaag = train, stippen = test)")
+    plt.title(f"train/test loss (n_lagen={N_LAGEN}, n_embed={N_EMBED}, lengte={LENGTE}, vaag = train, stippen = test)")
     plt.legend()
     plt.tight_layout()
     plot_pad = Path(__file__).parent / "loss.png"
