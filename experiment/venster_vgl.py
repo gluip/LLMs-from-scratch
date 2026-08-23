@@ -8,7 +8,10 @@ from exp import (maak_batch, train_affiniteitsmodel, DATA_MAP, TEKST_BESTANDEN,
                  TRAIN_FRACTIE, CharTokenizer)
 
 N_STAPPEN = 5000
-VENSTERS = [16, 32, 64, 128, 256]
+UITVOER = Path(__file__).parent / "venster_resultaten.pt"
+VENSTERS = [16, 32, 64, 128]
+# 256 is bewust weggelaten: 128 kostte al 2235s tegen 178s voor 64, en leverde
+# op de laatste positie nog maar 0,012 op. 256 kost uren voor vrijwel niets.
 
 boeken = [(n, (DATA_MAP / n).read_text(encoding="utf-8")) for n in TEKST_BESTANDEN]
 tok = CharTokenizer("".join(t for _, t in boeken))
@@ -51,5 +54,7 @@ for lengte in VENSTERS:
     resultaten[lengte] = pp
     print(f"venster {lengte:>4d}  gemiddeld {pp.mean():.4f}  laatste positie {pp[-1]:.4f}  "
           f"({time.time()-t0:.0f}s)", flush=True)
+    # na elk venster wegschrijven: valt een latere run om, dan ben je de rest niet kwijt
+    torch.save(resultaten, UITVOER)
 
-torch.save(resultaten, Path(__file__).parent / "venster_resultaten.pt")
+

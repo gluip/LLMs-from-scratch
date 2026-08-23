@@ -314,7 +314,7 @@ def train_affiniteitsmodel(
         tokenizer.vocab_size, n_embed=n_embed, n_lagen=n_lagen,
         gebruik_positie=gebruik_positie, gebruik_feedforward=gebruik_feedforward, losse_qk=losse_qk, losse_v=losse_v,
         gebruik_layernorm=gebruik_layernorm, gebruik_masker=gebruik_masker, dropout=dropout,
-        n_koppen=n_koppen, uit_projectie=uit_projectie,
+        n_koppen=n_koppen, uit_projectie=uit_projectie, max_lengte=lengte,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_stappen)
@@ -459,7 +459,8 @@ if __name__ == "__main__":
         "config": dict(n_embed=N_EMBED, n_lagen=N_LAGEN, n_koppen=N_KOPPEN,
                        gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
                        losse_qk=LOSSE_QK, losse_v=LOSSE_V, gebruik_layernorm=GEBRUIK_LAYERNORM,
-                       gebruik_masker=GEBRUIK_MASKER, uit_projectie=UIT_PROJECTIE, dropout=0.0),
+                       gebruik_masker=GEBRUIK_MASKER, uit_projectie=UIT_PROJECTIE, dropout=0.0,
+                       max_lengte=LENGTE),
         "lengte": LENGTE,
     }, model_pad)
     print(f"model opgeslagen:  {model_pad}")
