@@ -49,6 +49,34 @@ Back-ups van eerdere "beste modellen": `model_zonder_rope.pt` (zelfde config
 zonder RoPE, absolute posities, 1,2781), `model_3boeken.pt` (zelfde config op
 de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
+## Huidige beste hiërarchische configuratie (`model_hierarchisch.pt`)
+
+Aparte architectuur (chars -> emergente woordvector -> transformer -> chars,
+zie `ontwerp_emergente_woordlaag.html`), dus een apart model naast `model.pt` -
+niet hetzelfde bestand, andere tokenizer-benadering, ander praat-script
+(`praat_hierarchisch.cmd`).
+
+| instelling | waarde |
+|---|---|
+| n_embed_buiten | 160 (5 lagen, 4 koppen, RoPE - matcht `model.pt`) |
+| n_embed_binnen (encoder/decoder) | 128, 4 lagen elk, 4 koppen |
+| MAX_BROK_LENGTE / BROK_VENSTER | 16 / 32 (~64 karakters) |
+| dropout / lr | 0,1 / **3e-3** (5e-3 gaf instabiliteit op deze grootte, zie experiment 17/18) |
+| n_stappen | 18000 |
+| dataset | zelfde 14 boeken, 10,2M karakters |
+| **nats/karakter (inhoud, EOW uitgesloten)** | **1,1730** — **wint van `model.pt` (1,2605)** met 0,088 |
+
+`HierarchischModel.forward` dedupliceert sinds experiment 18 de encoder-
+aanroep (`torch.unique(..., dim=0)`) - ~70% van de brokken in een batch is
+een letterlijke herhaling (spaties, "de", "een", ...), dus dat scheelt 27%
+rekentijd per stap zonder de uitkomst te veranderen.
+
+Back-ups van eerdere versies: `model_hierarchisch_v1.pt` (64/2, 18000
+stappen, 1,3004), `model_hierarchisch_v2_18k.pt` (96/3, 18000 stappen,
+1,2139), `model_hierarchisch_v3_36k.pt` (96/3, 36000 stappen, 1,1882 - bleek
+een capaciteitsplafond, zie experiment 19: ook 72000 stappen kwam niet lager
+dan 1,1748).
+
 ## Geprobeerd en verworpen — niet zomaar opnieuw proberen
 
 - **QKV breder dan n_embed** (`qkv_factor` 1x/1,5x/2x, ~zomer 2026). Geen
@@ -268,3 +296,178 @@ implementaties elders in het boek):
 - Verder, minder uitgewerkt: automatentheorie/stack-geheugen voor geneste
   structuur (haakjes, aanhalingstekens), numerieke cognitie/plaatswaarde-
   encodering voor cijferrelaties, fonetische features voor rijm.
+
+### 14. Emergente woordvectoren: chars -> geleerde woordvector -> transformer -> chars
+
+- **Scripts:** `hierarchisch.py` (bouwstenen + smoke-tests), `train_hierarchisch.py`
+  (volle run), zie `ontwerp_emergente_woordlaag.html` voor de uitleg met plaatjes.
+- **Parameters:** `MAX_BROK_LENGTE=16, BROK_VENSTER=32 (~64 karakters),
+  n_embed_binnen=64, n_lagen_enc=2, n_lagen_dec=2, n_koppen_binnen=4,
+  n_embed_buiten=160, n_lagen_buiten=5, n_koppen_buiten=4, dropout=0.1, lr=5e-3,
+  aantal=64, n_stappen=18000 (35,6ms/stap gemeten, ~10,5 min), gebruik_rope=True
+  op de buitenste stack, dataset=14 boeken (10,2M tekens)`
+- **Opzet:** i.p.v. tiktoken/BPE (afgewezen: vaste, op Engels getrainde
+  vocabulaire) een architectuur zonder énige vaste woordenlijst. Drie
+  onderdelen: (1) `KarakterEncoder` - berekent per brok (woord of witruimte-run)
+  één vector uit de letters, niet-causaal, masked mean-pooling, géén opzoektabel
+  dus werkt ook op nooit-geziene woorden; (2) kale `Blok`-stack (ongewijzigd
+  hergebruikt uit exp.py, causaal, RoPE) over de reeks woordvectoren; (3)
+  `KarakterDecoder` - genereert het volgende woord letter voor letter uit de
+  context, i.p.v. classificatie uit een vaste lijst. PAD/EOW-boekhouding voor
+  vaste brok-lengte (content gecapt op M-1, dan EOW, dan PAD).
+- **Uitkomst:** eerlijke vergelijking (nats/karakter, EOW uitgesloten) tegen de
+  char-baseline (1,2605): **1,2963** (+0,0358) - opvallend dicht bij de
+  baseline voor een fundamenteel andere architectuur die zijn eigen
+  woordrepresentaties vanaf nul moest leren in dezelfde trainingstijd.
+  Buurwoorden-check toont bescheiden maar echte structuur: `cos(huis,huizen)
+  =0,871`, `cos(speelde,speelden)=0,947`, `cos(mooi,mooie)=0,955` allemaal
+  hoger dan `cos(de,het)=0,837` en `cos(Pinkeltje,kabouter)=0,693`.
+- **⚠️ Bug gevonden via de validatie-checks, niet via de loss:** de eerste
+  volle run gaf onleesbare tekst (`"m m e o m seern..."`, 2% bestaande
+  woorden) ondanks een normaal ogend loss-getal. Oorzaak: `genereer_hierarchisch`
+  zette een net gegenereerd karakter op index `i+1` in plaats van `i` in de
+  decoder-invoer (`KarakterDecoder.forward` plaatst `doelbrok[k]` op
+  h-positie `k+1`), waardoor de causale context tijdens genereren een plek
+  opschoof. Trainen zelf gebruikte de kant-en-klare `doelbrok`-tensor en had
+  deze bug niet - vandaar het misleidend normale loss-getal naast kapotte
+  tekst. Na de fix (zelfde getrainde gewichten, geen hertraining nodig):
+  **100% bestaande woorden bij temperatuur 0,6, 92% bij 0,8, 78% bij 1,0**,
+  en leesbaar, grammaticaal Nederlands ("Op een dag bij de kamer te stoorde
+  en zich in alle trekken te bescheiden. Zij had den kamer voor de
+  gelegenheid gevonden...").
+- **Conclusie:** dit is precies het scenario waar de validatie-checks voor
+  gebouwd zijn (zie de "hoe checken we of de woorden OK zijn"-sectie in
+  `ontwerp_emergente_woordlaag.html`) - de loss-cijfers alleen hadden deze
+  bug nooit blootgelegd. Met de fix is dit een sterke, werkende proof of
+  concept: kwalitatief vergelijkbaar met het char-model, zonder ooit een
+  vaste woordenlijst te gebruiken. **Nog niet gepromoveerd tot `model.pt`**
+  (apart opgeslagen als `model_hierarchisch.pt`, `praat.py` weet er nog niks
+  van) - dat is een bewuste volgende stap, geen automatisme, zoals bij elk
+  eerder experiment deze sessie.
+
+### 15. Char-model tegen hiërarchisch model, direct naast elkaar
+
+- **Script:** `hierarchisch_vs_char_vgl.py` (laadt beide al-getrainde modellen,
+  geen hertraining), `praat_hierarchisch.py`/`.cmd` (los REPL-script, zusje
+  van `praat.cmd`, zodat je ze interactief naast elkaar kunt proberen).
+- **Uitkomst:** char-model 1,2605 nats/char (1.591.508 parameters) tegen
+  hiërarchisch 1,3004-1,3050 nats/char (1.783.157 parameters, 12% meer) - het
+  char-model won op dat moment, buiten de meetruis. Op dezelfde prompts bleef
+  het hiërarchische model herkenbaar Nederlands maar iets schokkeriger, met
+  af en toe een verzonnen woord.
+- **Conclusie:** geen verrassing - het char-model heeft 13 experimenten
+  hypertuning achter zich, het hiërarchische model nog geen enkele (leende
+  lr/dropout klakkeloos van het char-model). Aanleiding voor experiment 16.
+
+### 16. Sweep van het hiërarchische model — en de winnaar
+
+- **Script:** `hierarchisch_sweep.py`
+- **Parameters (vast):** `MAX_BROK_LENGTE=16, BROK_VENSTER=32, n_embed_buiten=160,
+  n_lagen_buiten=5, n_koppen_buiten=4, n_koppen_binnen=4, aantal=64,
+  n_stappen=18000 (volle runs, geen verkorte-run-fout zoals experiment 3),
+  dataset=14 boeken`; varianten: baseline (lr5e-3,drop0.1,n_embed_binnen=64,
+  2 lagen), dropout=0, lr=8e-3, en n_embed_binnen=96 met 3 lagen encoder/decoder.
+- **Diagnose vooraf:** de trainingscurve van de eerste poging had een klein
+  train/test-gat (~0,1-0,15) - geen overfitting-signatuur zoals bij het
+  char-model zonder dropout, eerder een teken dat het model nog niet tegen
+  een plafond aanliep. Dat wees op capaciteit, niet op leerrate/regularisatie.
+- **Uitkomst:** baseline 1,3050, dropout=0 1,3047, lr=8e-3 1,3058 - alle drie
+  identiek binnen de ruis, bevestigt dat lr/dropout niet de bottleneck waren.
+  **Grotere binnen-encoder/decoder (96 dim, 3 lagen): 1,2139** - een
+  duidelijke, structurele verbetering (zichtbaar vanaf ~stap 1500 in de
+  loss-curve, niet pas aan het eind) en **wint van de char-baseline (1,2605)**
+  met 0,047 nats, ondanks nog steeds geen enkele vaste woordenlijst.
+- **Conclusie:** de bottleneck van de eerste poging zat inderdaad in
+  representatiecapaciteit van de karakter-encoder/-decoder, niet in
+  optimalisatie. Dit is nu de nieuwe standaard-hiërarchische-configuratie,
+  opgeslagen als `model_hierarchisch.pt` (oude versie: `model_hierarchisch_v1.pt`).
+  Nog niet gesweept: `MAX_BROK_LENGTE`/`BROK_VENSTER`, nog grotere binnen-
+  capaciteit (is 96/3 lagen zelf al een plafond, of kan het verder groeien?),
+  en `n_embed_buiten` los van het char-model optimaliseren in plaats van
+  klakkeloos matchen.
+
+### 17. Nog groter, of langer trainen? (vervolg op experiment 16)
+
+- **Script:** `hierarchisch_sweep2.py`
+- **Parameters (vast):** zelfde als experiment 16, dataset=14 boeken. De
+  18k/96-3-winnaar zelf is hergebruikt uit `hierarchisch_sweep_resultaten.pt`,
+  niet opnieuw getraind.
+- **Varianten:** `n_embed_binnen=128, n_lagen_enc/dec=4, n_stappen=18000` (nog
+  groter) tegen `n_embed_binnen=96, n_lagen_enc/dec=3, n_stappen=36000`
+  (langer trainen op de bekende winnaar).
+- **Uitkomst "nog groter" (128/4): 1,4752 — duidelijk slechter**, niet beter.
+  Oorzaak zichtbaar in de trainingscurve: een echte instabiliteit (train-loss
+  piekte naar 10,2 rond stap 7500, gradient-explosie, geen ruis) waar het
+  model nooit meer volledig van herstelde. Dit is *geen* bewijs dat 96/3 een
+  hard capaciteitsplafond is - het laat zien dat `lr=5e-3` (klakkeloos
+  overgenomen van de 96/3-config) te grof is voor een groter/dieper model,
+  hetzelfde patroon als bij het char-model in experiment 2/3 (lr die voor de
+  ene omvang werkt, faalt bij een grotere zonder aanpassing).
+- **Uitkomst "langer trainen" (96/3, 36k): 1,1882 — beter dan de 18k-winnaar
+  (1,2139)**, stabiele curve, geen instabiliteit. Bevestigt de diagnose: het
+  model was bij 18000 stappen nog niet uitgeleerd, in tegenstelling tot het
+  char-model waar `langer_trainen.py` liet zien dat de data toen al
+  verzadigd was (experiment 6) - dit model doet per stap een moeilijkere,
+  samengestelde taak en heeft kennelijk meer herhaling nodig.
+- **Conclusie:** langer trainen was de winnende hefboom, niet groter maken.
+  Nieuwe standaard-hiërarchische-configuratie: 96/3, 36000 stappen, **1,1882
+  nats/char — 0,072 beter dan de char-baseline (1,2605)**. Opgeslagen als
+  `model_hierarchisch.pt` (18k-versie veiliggesteld als
+  `model_hierarchisch_v2_18k.pt`). Open vraag voor een volgende sessie: zou
+  128/4 (of groter) wél winnen bij een lagere leerrate of warmup, gegeven dat
+  de instabiliteit en niet de capaciteit zelf de tegenvaller verklaarde?
+
+### 18. Nog verder: 72k stappen, en 128/4 met een lagere leerrate
+
+- **Script:** `hierarchisch_sweep3.py`
+- **Parameters (vast):** zelfde als experiment 16/17, dataset=14 boeken.
+- **Varianten:** `n_embed_binnen=96, 3 lagen, n_stappen=72000` (nog langer,
+  na het succes van 18k->36k) en `n_embed_binnen=128, 4 lagen, n_stappen=18000,
+  lr=3e-3` (de instabiele 128/4 uit experiment 17 opnieuw, nu met een lagere
+  leerrate dan de 5e-3 die daar een gradient-explosie gaf).
+- **Uitkomst 128/4, lr=3e-3: 1,1730 — stabiel** (hoogste train-loss na
+  opwarmen: 1,22, geen piek zoals bij lr=5e-3) **en beter dan de 36k/96-3-
+  winnaar (1,1882), in de helft van de stappen (18k tegen 36k).** Bevestigt
+  de hypothese uit experiment 17 hard: de instabiliteit was een leerrate-
+  probleem, geen capaciteitsplafond. Nieuwe standaard-hiërarchische-
+  configuratie, opgeslagen als `model_hierarchisch.pt` (36k-versie
+  veiliggesteld als `model_hierarchisch_v3_36k.pt`).
+- **Zijspoor - een echte snelheidsoptimalisatie gevonden:** tijdens het
+  wachten kwam de vraag of de batch-dimensie wel goed gebruikt werd. Dat
+  bleek te kloppen, maar leverde wel een concrete optimalisatie op: gemeten
+  op één trainingsbatch was van de 2048 "woord-slots" (aantal x venster)
+  maar 610 uniek - **70,2% van het werk van de karakter-encoder was
+  letterlijke herhaling** (spaties alleen al 1009x in één batch, plus
+  veelvoorkomende woordjes als "de"/"een"/"en"/"van"). De encoder is een
+  pure functie van de karakters, dus dat is puur verspild werk. Fix in
+  `HierarchischModel.forward`: `torch.unique(..., dim=0, return_inverse=True)`
+  vóór de encoder-aanroep, resultaat terug uitgesmeerd met de inverse-index.
+  Geldt niet voor de decoder (die krijgt per positie een andere contextvector
+  mee, dus geen herhaling om te benutten). Correctheid geverifieerd op CPU:
+  logits exact identiek (verschil 0,0), gradiënten identiek tot op
+  afrondingsniveau (~1,9e-6). Gemeten snelheidswinst: 48ms/stap tegen 65,5ms/
+  stap voorheen - **27% sneller**, zonder enige verandering in de uitkomst.
+- **Conclusie:** twee onafhankelijke winsten uit één ronde - een betere
+  hyperparameter-configuratie (128/4, lr=3e-3) én een gratis snelheids-
+  optimalisatie (encoder-deduplicatie) die alle toekomstige runs met dit
+  model versnelt, ook als de hyperparameters weer veranderen.
+
+### 19. 72k stappen op 96/3 - bevestigt een écht capaciteitsplafond
+
+- **Script:** `hierarchisch_sweep3.py` (herstart ná de dedup-fix, dus met de
+  27% snellere encoder - de 72k stappen kostten 59,1 min i.p.v. de ~80 min
+  die zonder de fix nodig waren geweest)
+- **Uitkomst: 1,1748** - vrijwel gelijk aan de 36k-uitkomst uit experiment 17
+  (1,1882) en de 18k/128-4-winnaar (1,1730), allemaal binnen de meetruis.
+  In `hierarchisch_sweep3.png` is goed te zien waarom: de curve van 96/3 ligt
+  al vanaf ~stap 10.000-15.000 plat en blijft daar de resterende 57.000
+  stappen hangen - geen kwestie van trainingsduur meer op dat moment, maar
+  een echt capaciteitsplafond van die modelgrootte. De 128/4-curve zakt in
+  minder stappen naar een lager niveau en blijft daar.
+- **Conclusie:** "langer trainen" was de juiste hefboom tussen 18k en 36k
+  (experiment 17), maar is bij 96/3 nu uitgewerkt - verder trainen op déze
+  grootte helpt niet meer. De winnende configuratie blijft **128/4, lr=3e-3,
+  18000 stappen: 1,1730 nats/char**, al gepromoveerd tot `model_hierarchisch.pt`.
+  Open vraag voor een volgende sessie: ligt bij 128/4 hetzelfde plafond-
+  patroon te wachten bij meer stappen, of geeft de grotere capaciteit ook
+  daar meer ruimte om te blijven verbeteren?

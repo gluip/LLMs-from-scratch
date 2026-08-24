@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Van Letter tot Woord</title>
+<meta name="description" content="Een heldere uitleg van het voorgestelde chars-naar-woorden-naar-chars model: hoe een woordvector emergent ontstaat uit letters, zonder vaste woordenlijst.">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Work+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+  :root {
+    --inkt: #151a22;
+    --inkt-zacht: #2a3342;
+    --vel: #edeff0;
+    --vel-diep: #dee1e4;
+    --signaal: #2e7d6b;
+    --signaal-zacht: #cfe6e0;
+    --marine: #3e5c82;
+    --marine-zacht: #dbe3ee;
+    --rook: #5c6675;
+
+    --bg: var(--vel);
+    --bg-paneel: #ffffff;
+    --bg-inzet: var(--vel-diep);
+    --fg: var(--inkt);
+    --fg-zwak: var(--rook);
+    --rand: #c9cdd2;
+    --accent: var(--signaal);
+    --accent-zwak: var(--signaal-zacht);
+    --tweede: var(--marine);
+    --tweede-zwak: var(--marine-zacht);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--inkt);
+      --bg-paneel: var(--inkt-zacht);
+      --bg-inzet: #1e2530;
+      --fg: #eceff1;
+      --fg-zwak: #9aa4b2;
+      --rand: #3a4453;
+      --accent: #4fb39c;
+      --accent-zwak: #223832;
+      --tweede: #7fa0cb;
+      --tweede-zwak: #202c3c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--inkt);
+    --bg-paneel: var(--inkt-zacht);
+    --bg-inzet: #1e2530;
+    --fg: #eceff1;
+    --fg-zwak: #9aa4b2;
+    --rand: #3a4453;
+    --accent: #4fb39c;
+    --accent-zwak: #223832;
+    --tweede: #7fa0cb;
+    --tweede-zwak: #202c3c;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'Work Sans', ui-sans-serif, system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .pagina {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 0 24px 120px;
+  }
+
+  h1, h2, h3 {
+    font-family: 'Fraunces', ui-serif, Georgia, serif;
+    text-wrap: balance;
+    font-weight: 600;
+    color: var(--fg);
+  }
+
+  p { max-width: 66ch; }
+
+  code, .mono {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  }
+
+  .eyebrow {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  /* ---------- Hero ---------- */
+  .hero {
+    padding: 88px 0 56px;
+  }
+  .hero h1 {
+    font-size: clamp(2.2rem, 5vw, 3.4rem);
+    line-height: 1.06;
+    margin: 14px 0 22px;
+    letter-spacing: -0.01em;
+  }
+  .hero .lead {
+    font-size: 1.15rem;
+    color: var(--fg-zwak);
+    max-width: 58ch;
+  }
+  .hero .lead strong { color: var(--fg); font-weight: 600; }
+
+  /* ---------- Generic section rhythm ---------- */
+  section.blok {
+    padding: 56px 0;
+    border-top: 1px solid var(--rand);
+  }
+  section.blok > .eyebrow { display: block; margin-bottom: 10px; }
+  section.blok h2 {
+    font-size: clamp(1.5rem, 3vw, 2rem);
+    margin: 0 0 16px;
+  }
+  section.blok .stap-nr {
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--accent);
+    font-size: 0.95rem;
+    font-weight: 500;
+  }
+
+  .paneel {
+    background: var(--bg-paneel);
+    border: 1px solid var(--rand);
+    border-radius: 10px;
+    padding: 28px;
+  }
+
+  /* ---------- Diagram figures ---------- */
+  figure.diagram {
+    margin: 28px 0 8px;
+    padding: 22px 18px;
+    background: var(--bg-inzet);
+    border: 1px solid var(--rand);
+    border-radius: 12px;
+    overflow-x: auto;
+  }
+  figure.diagram svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  figure.diagram figcaption {
+    margin-top: 14px;
+    font-size: 0.88rem;
+    color: var(--fg-zwak);
+    text-align: center;
+    max-width: 60ch;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  svg text { fill: currentColor; }
+  .svg-accent { color: var(--accent); }
+  .svg-tweede { color: var(--tweede); }
+  .svg-fg { color: var(--fg); }
+  .svg-zwak { color: var(--fg-zwak); }
+
+  /* ---------- Twee-koloms uitleg ---------- */
+  .split {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 28px;
+    margin-top: 18px;
+  }
+  @media (min-width: 720px) {
+    .split.helft { grid-template-columns: 1fr 1fr; }
+  }
+
+  .kaart {
+    background: var(--bg-paneel);
+    border: 1px solid var(--rand);
+    border-radius: 10px;
+    padding: 20px 22px;
+  }
+  .kaart h3 {
+    font-size: 1.05rem;
+    margin: 0 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .kaart p { margin: 0; font-size: 0.95rem; color: var(--fg-zwak); }
+  .kaart.nee { border-color: color-mix(in srgb, var(--rook) 40%, var(--rand)); }
+  .kaart.ja { border-color: color-mix(in srgb, var(--accent) 45%, var(--rand)); background: color-mix(in srgb, var(--accent-zwak) 35%, var(--bg-paneel)); }
+  .uitkomst { font-family: 'IBM Plex Mono', monospace; font-size: 0.85rem; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--rand); }
+  .uitkomst.goed { color: var(--accent); }
+  .uitkomst.slecht { color: var(--rook); }
+
+  /* ---------- Checklist (validatie) ---------- */
+  .checklijst {
+    list-style: none;
+    margin: 22px 0 0;
+    padding: 0;
+    display: grid;
+    gap: 14px;
+  }
+  .checklijst li {
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    gap: 14px;
+    align-items: start;
+  }
+  .checklijst .vink {
+    width: 26px; height: 26px;
+    border-radius: 7px;
+    background: var(--accent-zwak);
+    color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    font-weight: 500;
+    margin-top: 2px;
+  }
+  .checklijst strong { display: block; font-size: 0.98rem; margin-bottom: 2px; }
+  .checklijst span.uitleg { color: var(--fg-zwak); font-size: 0.92rem; }
+
+  /* ---------- Kosten callout ---------- */
+  .callout {
+    display: flex;
+    gap: 16px;
+    padding: 20px 22px;
+    border-radius: 10px;
+    background: var(--tweede-zwak);
+    border: 1px solid color-mix(in srgb, var(--tweede) 35%, var(--rand));
+  }
+  .callout .icoon {
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--tweede);
+    font-weight: 500;
+    font-size: 0.8rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    padding-top: 2px;
+  }
+  .callout p { margin: 0; font-size: 0.95rem; }
+
+  .status {
+    margin-top: 56px;
+    padding: 22px 24px;
+    border-radius: 10px;
+    border: 1px dashed var(--rand);
+    display: flex;
+    gap: 14px;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+  .status .eyebrow { margin: 0; }
+  .status p { margin: 6px 0 0; color: var(--fg-zwak); font-size: 0.95rem; }
+
+  footer.voet {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--rand);
+    color: var(--fg-zwak);
+    font-size: 0.85rem;
+  }
+
+  @media (max-width: 480px) {
+    .hero { padding-top: 56px; }
+    section.blok { padding: 40px 0; }
+    figure.diagram { padding: 16px 10px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="pagina">
+
+  <header class="hero">
+    <span class="eyebrow">experiment/hierarchisch.py — ontwerpuitleg</span>
+    <h1>Woorden die het model zelf leert vormen uit letters</h1>
+    <p class="lead">
+      Geen woordenboek, geen vaste lijst van tokens zoals tiktoken die gebruikt —
+      dit model <strong>berekent</strong> wat een woord betekent, elke keer opnieuw,
+      rechtstreeks uit de letters. Deze pagina legt uit hoe dat werkt, in drie
+      stappen, met de bouwstenen die er al zijn.
+    </p>
+  </header>
+
+  <!-- ============================================================ -->
+  <section class="blok">
+    <span class="eyebrow">het probleem</span>
+    <h2>Drie manieren om tekst in stukjes te knippen</h2>
+    <p>
+      Voordat een model iets kan leren, moet tekst worden opgeknipt in stukjes die
+      het kan verwerken. Er zijn drie manieren om dat te doen — en ze verschillen
+      in wie bepaalt wat een "stukje" is.
+    </p>
+
+    <div class="split" style="grid-template-columns: 1fr; margin-top:24px;">
+      <div class="kaart">
+        <h3><span class="mono" style="color:var(--fg-zwak)">A</span> Karakter voor karakter — het huidige model</h3>
+        <p>Elke letter is een eigen stukje. Simpel en flexibel, maar het model moet
+          zelf helemaal leren dat "h-u-i-s" iets anders is dan vier losse letters.</p>
+        <div class="uitkomst goed">"huis" → <span class="mono">h · u · i · s</span> (4 stukjes, altijd hetzelfde recept)</div>
+      </div>
+      <div class="kaart nee">
+        <h3><span class="mono" style="color:var(--fg-zwak)">B</span> Tiktoken (afgewezen) — een vaste, kant-en-klare lijst</h3>
+        <p>Een extern, vooraf getraind woordenboek van ~50.000 stukjes, vooral op
+          Engels getraind. Elk Nederlands woord wordt in vaste, niet-aanpasbare
+          stukken gehakt — het model heeft daar geen invloed op.</p>
+        <div class="uitkomst slecht">"huizen" → <span class="mono">huiz · en</span> (vastgelegd, niet geleerd)</div>
+      </div>
+      <div class="kaart ja">
+        <h3><span class="mono" style="color:var(--accent)">C</span> Emergent — dit plan</h3>
+        <p>Ook hier is de <em>grens</em> tussen woorden gewoon een spatie (net zo
+          simpel als optie A). Maar wat een woord <em>betekent</em> — zijn vector —
+          wordt door een stukje netwerk berekend uit de letters, en dat netwerk
+          leert zelf wat daarin belangrijk is.</p>
+        <div class="uitkomst goed">"huizen" → <span class="mono">[h,u,i,z,e,n]</span> → één berekende vector, geen opzoektabel</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="blok">
+    <span class="eyebrow">de pijplijn — overzicht</span>
+    <h2>Drie onderdelen, elkaar opvolgend</h2>
+    <p>
+      Het model bestaat uit drie stukken die na elkaar werken: eerst worden de
+      letters van één woord samengevat tot één vector, dan denkt een transformer
+      na over de reeks van die vectoren (dit deel bestaat al — het is het huidige
+      model, ongewijzigd), en tot slot wordt het volgende woord weer terug
+      "uitgetypt", letter voor letter.
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 920 260" role="img" aria-label="Pijplijn: ruwe tekst wordt gesplitst in brokken, elk brok gaat door de karakter-encoder naar een woordvector, de reeks woordvectoren gaat door de woord-transformer naar contextvectoren, en de laatste contextvector stuurt de karakter-decoder aan die het volgende woord letter voor letter genereert, dat weer terug de pijplijn ingaat.">
+        <defs>
+          <marker id="pijl" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <!-- tekst -->
+        <text x="50" y="30" class="mono svg-zwak" font-size="11">"Pinkeltje speelde buiten."</text>
+
+        <!-- brokken -->
+        <g class="svg-fg">
+          <rect x="20" y="45" width="72" height="26" rx="5" fill="none" stroke="currentColor"/>
+          <text x="56" y="62" text-anchor="middle" class="mono" font-size="11">Pinkeltje</text>
+          <rect x="98" y="45" width="66" height="26" rx="5" fill="none" stroke="currentColor"/>
+          <text x="131" y="62" text-anchor="middle" class="mono" font-size="11">speelde</text>
+          <rect x="170" y="45" width="52" height="26" rx="5" fill="none" stroke="currentColor"/>
+          <text x="196" y="62" text-anchor="middle" class="mono" font-size="11">buiten.</text>
+        </g>
+        <text x="20" y="94" class="svg-zwak" font-size="10.5">in brokken gesplitst (spaties = gratis grens)</text>
+
+        <line x1="121" y1="104" x2="121" y2="126" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl)"/>
+
+        <!-- encoder box -->
+        <rect x="20" y="130" width="202" height="46" rx="8" fill="none" stroke="currentColor" class="svg-accent" stroke-width="1.6"/>
+        <text x="121" y="149" text-anchor="middle" class="svg-accent" font-size="12" font-weight="600">karakter-encoder</text>
+        <text x="121" y="164" text-anchor="middle" class="svg-zwak" font-size="9.5">per brok · geen opzoektabel</text>
+
+        <line x1="222" y1="153" x2="255" y2="153" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl)"/>
+
+        <!-- woordvectoren -->
+        <g class="svg-accent">
+          <circle cx="272" cy="153" r="7"/>
+          <circle cx="292" cy="153" r="7"/>
+          <circle cx="312" cy="153" r="7"/>
+        </g>
+        <text x="292" y="180" text-anchor="middle" class="svg-zwak" font-size="9.5">woordvectoren</text>
+
+        <line x1="330" y1="153" x2="368" y2="153" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl)"/>
+
+        <!-- transformer box -->
+        <rect x="372" y="118" width="200" height="70" rx="8" fill="none" stroke="currentColor" class="svg-tweede" stroke-width="1.6"/>
+        <text x="472" y="147" text-anchor="middle" class="svg-tweede" font-size="12" font-weight="600">woord-transformer</text>
+        <text x="472" y="163" text-anchor="middle" class="svg-zwak" font-size="9.5">bestaand model — ongewijzigd</text>
+        <text x="472" y="178" text-anchor="middle" class="svg-zwak" font-size="9.5">ziet alleen terug, nooit vooruit</text>
+
+        <line x1="572" y1="153" x2="610" y2="153" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl)"/>
+
+        <!-- context vector -->
+        <circle cx="628" cy="153" r="8" class="svg-tweede" fill="currentColor"/>
+        <text x="628" y="180" text-anchor="middle" class="svg-zwak" font-size="9.5">context tot nu toe</text>
+
+        <line x1="642" y1="153" x2="680" y2="153" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl)"/>
+
+        <!-- decoder box -->
+        <rect x="684" y="130" width="200" height="46" rx="8" fill="none" stroke="currentColor" class="svg-accent" stroke-width="1.6"/>
+        <text x="784" y="149" text-anchor="middle" class="svg-accent" font-size="12" font-weight="600">karakter-decoder</text>
+        <text x="784" y="164" text-anchor="middle" class="svg-zwak" font-size="9.5">typt letter voor letter</text>
+
+        <line x1="784" y1="104" x2="784" y2="126" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl)" transform="rotate(180 784 115)"/>
+
+        <!-- output -->
+        <text x="784" y="30" text-anchor="middle" class="mono svg-fg" font-size="12" font-weight="500">v-r-o-l-i-j-k</text>
+        <text x="784" y="94" text-anchor="middle" class="svg-zwak" font-size="10.5">nieuw woord, karakter voor karakter</text>
+
+        <!-- loop back -->
+        <path d="M 784 45 C 900 45, 900 250, 480 250 C 250 250, 100 230, 92 176"
+              fill="none" stroke="currentColor" class="svg-zwak" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#pijl)"/>
+        <text x="480" y="244" text-anchor="middle" class="svg-zwak" font-size="9.5">gaat opnieuw de pijplijn in als volgend brok</text>
+      </svg>
+      <figcaption>De hele pijplijn: tekst → brokken → per brok één vector (encoder) → transformer over de reeks vectoren (bestaand) → laatste context stuurt de decoder aan, die het volgende woord letter voor letter typt. Dat nieuwe woord gaat er daarna zelf weer in.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="blok">
+    <span class="stap-nr">Onderdeel 1 / 3</span>
+    <h2>Karakter-encoder — letters worden één vector</h2>
+    <p>
+      Elk brok (een woord, of een stukje witruimte) gaat apart door een klein
+      netwerkje: eerst krijgt elke letter zijn eigen geleerde vector, dan mogen
+      die letters <em>onderling</em> naar elkaar kijken (geen volgorde-beperking —
+      het hele woord is al bekend), en aan het eind wordt alles samengevat tot
+      precies één vector.
+    </p>
+    <figure class="diagram">
+      <svg viewBox="0 0 640 190" role="img" aria-label="Het woord huis wordt letter voor letter ingevoerd, gaat door een niet-causale aandachtslaag waar alle letters elkaar zien, en wordt daarna samengevat tot één woordvector.">
+        <defs>
+          <marker id="pijl2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+        <g class="mono svg-fg" font-size="13" font-weight="500">
+          <rect x="20" y="20" width="34" height="34" rx="6" fill="none" stroke="currentColor"/>
+          <text x="37" y="42" text-anchor="middle">h</text>
+          <rect x="64" y="20" width="34" height="34" rx="6" fill="none" stroke="currentColor"/>
+          <text x="81" y="42" text-anchor="middle">u</text>
+          <rect x="108" y="20" width="34" height="34" rx="6" fill="none" stroke="currentColor"/>
+          <text x="125" y="42" text-anchor="middle">i</text>
+          <rect x="152" y="20" width="34" height="34" rx="6" fill="none" stroke="currentColor"/>
+          <text x="169" y="42" text-anchor="middle">s</text>
+        </g>
+        <text x="103" y="70" text-anchor="middle" class="svg-zwak" font-size="10">elke letter: eigen geleerde vector</text>
+
+        <!-- fan lines into non-causal block, showing all-to-all -->
+        <g class="svg-zwak" stroke="currentColor" stroke-width="0.8" opacity="0.55">
+          <line x1="37" y1="54" x2="240" y2="105"/>
+          <line x1="81" y1="54" x2="240" y2="105"/>
+          <line x1="125" y1="54" x2="240" y2="105"/>
+          <line x1="169" y1="54" x2="240" y2="105"/>
+        </g>
+
+        <rect x="240" y="88" width="180" height="46" rx="8" fill="none" stroke="currentColor" class="svg-accent" stroke-width="1.6"/>
+        <text x="330" y="107" text-anchor="middle" class="svg-accent" font-size="12" font-weight="600">niet-causale laag</text>
+        <text x="330" y="122" text-anchor="middle" class="svg-zwak" font-size="9">alle letters zien elkaar</text>
+
+        <line x1="420" y1="111" x2="452" y2="111" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl2)"/>
+
+        <rect x="456" y="90" width="90" height="42" rx="7" fill="none" stroke="currentColor" class="svg-zwak" stroke-dasharray="3 3"/>
+        <text x="501" y="107" text-anchor="middle" class="svg-zwak" font-size="9.5">samenvatten</text>
+        <text x="501" y="120" text-anchor="middle" class="svg-zwak" font-size="9.5">(pooling)</text>
+
+        <line x1="546" y1="111" x2="578" y2="111" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl2)"/>
+
+        <circle cx="598" cy="111" r="11" class="svg-accent" fill="currentColor"/>
+        <text x="598" y="150" text-anchor="middle" class="svg-fg" font-size="10.5" font-weight="500">woordvector</text>
+        <text x="598" y="163" text-anchor="middle" class="svg-zwak" font-size="9">"huis"</text>
+      </svg>
+      <figcaption>Dit gebeurt voor élk brok apart, of het nu "huis", "huizen" of een woord is dat nooit eerder voorkwam — het netwerk kent geen woorden uit het hoofd, het berekent ze uit de letters.</figcaption>
+    </figure>
+    <div class="callout" style="margin-top:20px;">
+      <span class="icoon">waarom dit werkt</span>
+      <p>Hetzelfde bouwblok als de rest van het model (<code>AffiniteitsLaag</code>/<code>Blok</code>) kan dit al: alleen de knop <code>gebruik_masker</code> gaat uit, zodat elke letter alle andere letters van hetzelfde woord mag zien. Er is dus geen nieuwe aandacht-machinerie nodig.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="blok">
+    <span class="stap-nr">Onderdeel 2 / 3</span>
+    <h2>Woord-transformer — dit bestaat al</h2>
+    <p>
+      Zodra elk brok zijn eigen vector heeft, is de rest simpel: dezelfde stapel
+      aandachtslagen die het model nu al gebruikt (causaal — mag alleen terugkijken,
+      niet vooruit) verwerkt de <em>reeks</em> van woordvectoren, precies zoals hij
+      nu een reeks van letter-vectoren verwerkt. Het enige verschil: waar de
+      vectoren vandaan komen.
+    </p>
+    <div class="split helft">
+      <div class="kaart">
+        <h3>Nu (karakter-niveau)</h3>
+        <p>Elke positie in de reeks is één <em>opgezochte</em> letter-vector uit
+          een tabel (<code>nn.Embedding</code>).</p>
+      </div>
+      <div class="kaart ja">
+        <h3>Voorgesteld (woord-niveau)</h3>
+        <p>Elke positie in de reeks is één <em>berekende</em> woordvector uit de
+          karakter-encoder hierboven.</p>
+      </div>
+    </div>
+    <p style="margin-top:18px; color:var(--fg-zwak); font-size:0.93rem;">
+      De aandachtslagen zelf — inclusief RoPE, dat dit project al gebruikt om
+      relatieve afstand te leren — hoeven niet te veranderen.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="blok">
+    <span class="stap-nr">Onderdeel 3 / 3</span>
+    <h2>Karakter-decoder — geen woordenlijst nodig</h2>
+    <p>
+      Hier zit de kern van "emergent": in plaats van dat het model uit een vaste
+      lijst kiest welk woord volgt, <em>typt</em> het model het volgende woord
+      letter voor letter, gestuurd door de contextvector uit de transformer.
+      Zodra het model een speciaal stopteken voorspelt (EOW — end of word), is
+      het woord klaar.
+    </p>
+    <div class="split helft">
+      <div class="kaart nee">
+        <h3>✗ Classificatie uit vaste lijst</h3>
+        <p>Eén stap: kies het waarschijnlijkste woord uit bijvoorbeeld 40.000
+          bekende woorden. Snel, maar een woord dat niet in die lijst staat kan
+          <strong>nooit</strong> voorspeld worden.</p>
+      </div>
+      <div class="kaart ja">
+        <h3>✓ Karakter voor karakter genereren</h3>
+        <p>Meerdere stappen: elke letter apart voorspellen totdat EOW volgt.
+          Trager, maar elk denkbaar woord — ook eentje dat nooit in de
+          trainingsdata voorkwam — is bereikbaar.</p>
+      </div>
+    </div>
+    <figure class="diagram">
+      <svg viewBox="0 0 640 150" role="img" aria-label="De contextvector wordt als startpunt gebruikt, waarna de decoder autoregressief letter voor letter genereert: h, u, i, z, e, n, en dan het end-of-word-teken.">
+        <defs>
+          <marker id="pijl3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+        <circle cx="34" cy="75" r="12" class="svg-tweede" fill="currentColor"/>
+        <text x="34" y="105" text-anchor="middle" class="svg-zwak" font-size="9.5">context</text>
+
+        <line x1="48" y1="75" x2="74" y2="75" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl3)"/>
+
+        <g class="mono svg-fg" font-size="13" font-weight="500">
+          <g>
+            <rect x="78" y="58" width="30" height="34" rx="6" fill="none" stroke="currentColor" class="svg-accent" stroke-width="1.5"/>
+            <text x="93" y="80" text-anchor="middle">h</text>
+          </g>
+          <line x1="108" y1="75" x2="128" y2="75" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl3)"/>
+          <g>
+            <rect x="132" y="58" width="30" height="34" rx="6" fill="none" stroke="currentColor" class="svg-accent" stroke-width="1.5"/>
+            <text x="147" y="80" text-anchor="middle">u</text>
+          </g>
+          <line x1="162" y1="75" x2="182" y2="75" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl3)"/>
+          <g>
+            <rect x="186" y="58" width="30" height="34" rx="6" fill="none" stroke="currentColor" class="svg-accent" stroke-width="1.5"/>
+            <text x="201" y="80" text-anchor="middle">i</text>
+          </g>
+          <line x1="216" y1="75" x2="236" y2="75" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl3)"/>
+          <g>
+            <rect x="240" y="58" width="30" height="34" rx="6" fill="none" stroke="currentColor" class="svg-accent" stroke-width="1.5"/>
+            <text x="255" y="80" text-anchor="middle">z</text>
+          </g>
+          <line x1="270" y1="75" x2="290" y2="75" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl3)"/>
+          <g>
+            <rect x="294" y="58" width="30" height="34" rx="6" fill="none" stroke="currentColor" class="svg-accent" stroke-width="1.5"/>
+            <text x="309" y="80" text-anchor="middle">e</text>
+          </g>
+          <line x1="324" y1="75" x2="344" y2="75" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl3)"/>
+          <g>
+            <rect x="348" y="58" width="30" height="34" rx="6" fill="none" stroke="currentColor" class="svg-accent" stroke-width="1.5"/>
+            <text x="363" y="80" text-anchor="middle">n</text>
+          </g>
+          <line x1="378" y1="75" x2="398" y2="75" stroke="currentColor" class="svg-zwak" marker-end="url(#pijl3)"/>
+          <g>
+            <rect x="402" y="58" width="54" height="34" rx="6" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            <text x="429" y="79" text-anchor="middle" font-size="10">EOW</text>
+          </g>
+        </g>
+        <text x="267" y="118" text-anchor="middle" class="svg-zwak" font-size="10">elke letter voorspeld op basis van alles ervoor — inclusief de context</text>
+        <path d="M 93 58 C 93 20, 363 20, 363 58" fill="none" stroke="currentColor" class="svg-zwak" stroke-width="1" stroke-dasharray="3 3"/>
+        <text x="228" y="15" text-anchor="middle" class="svg-zwak" font-size="9">causaal: elke letter mag terugkijken naar alles wat al getypt is</text>
+      </svg>
+      <figcaption>Autoregressief genereren, net als het huidige model al doet — alleen begint de reeks nu met de woord-context in plaats van met niets.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="blok">
+    <span class="eyebrow">wat het kost</span>
+    <h2>De prijs van geen woordenlijst</h2>
+    <div class="callout">
+      <span class="icoon">rekenwerk</span>
+      <p>Elk woord kost nu meerdere stapjes in plaats van één opzoeking: de
+        encoder verwerkt elk brok apart, en de decoder typt tot wel 15 letters
+        na elkaar. Bij een venster van bijvoorbeeld 32 woorden zijn dat al snel
+        duizenden kleine berekeningen per trainingsstap — merkbaar trager dan het
+        huidige, platte model.</p>
+    </div>
+    <div class="callout" style="margin-top:14px;">
+      <span class="icoon">boekhouding</span>
+      <p>Woorden hebben verschillende lengtes, maar de code werkt het makkelijkst
+        met vaste maten. Oplossing: elk woord krijgt een vaste maximumlengte,
+        aangevuld met opvulkarakters (PAD) na een stopteken (EOW) — nieuwe
+        boekhouding die het huidige model niet nodig heeft.</p>
+    </div>
+    <div class="callout" style="margin-top:14px;">
+      <span class="icoon">ervoor terug</span>
+      <p>Geen enkel woord is ooit "onbekend". Een gloednieuw of zeldzaam
+        Nederlands woord wordt net zo goed verwerkt als "de" of "het" — er is
+        nergens een grens aan wat het model kan lezen of schrijven.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section class="blok">
+    <span class="eyebrow">de open vraag</span>
+    <h2>Hoe checken we of de woordvectoren goed zijn?</h2>
+    <p>
+      De grens tussen woorden komt van spaties — die staat vast. Maar de
+      <em>vector</em> die de encoder van een woord maakt, is geleerd, en een
+      slecht getrainde encoder valt niet vanzelf op in één los loss-getal. Vijf
+      concrete controles, van goedkoop naar duur:
+    </p>
+    <ul class="checklijst">
+      <li>
+        <span class="vink">1</span>
+        <div><strong>Determinisme</strong><span class="uitleg">Hetzelfde woord twee keer coderen moet dezelfde vector geven, twee verschillende woorden een verschillende. Gratis te checken, nog vóór er getraind is.</span></div>
+      </li>
+      <li>
+        <span class="vink">2</span>
+        <div><strong>Buurwoorden</strong><span class="uitleg">Cosinus-gelijkenis tussen bv. "huis" en "huizen" (verwant) versus "huis" en "visser" (onverwant) — verwante woorden horen dichter bij elkaar te liggen.</span></div>
+      </li>
+      <li>
+        <span class="vink">3</span>
+        <div><strong>Woordlengte-verdeling</strong><span class="uitleg">Zet je de lengte van gegenereerde woorden naast de echte verdeling in het corpus, dan zie je meteen of het model té vroeg of nooit stopt.</span></div>
+      </li>
+      <li>
+        <span class="vink">4</span>
+        <div><strong>Percentage bestaande woorden</strong><span class="uitleg">Hoeveel gegenereerde woorden komen letterlijk in de trainingsdata voor? Geen perfecte maat (nieuwe geldige woorden zijn ook prima), maar een signaal dat moet stijgen.</span></div>
+      </li>
+      <li>
+        <span class="vink">5</span>
+        <div><strong>Gewoon lezen</strong><span class="uitleg">Zoals bij elk eerder experiment in dit project: de gegenereerde tekst zelf bekijken. Dat ving eerder al vervuilde ouderwetse spelling op die de loss-cijfers alleen niet lieten zien.</span></div>
+      </li>
+    </ul>
+  </section>
+
+  <div class="status">
+    <span class="eyebrow">status</span>
+    <p>Dit is nog een <strong>ontwerp</strong>, niets is gebouwd. Volgende stap
+      (als dit ontwerp duidelijk genoeg is): eerst een goedkope smoke-test op
+      één boek, met een klein model en een paar honderd stappen — pas daarna
+      een volle, vergelijkbare run tegen het huidige model.</p>
+  </div>
+
+  <footer class="voet">
+    Uitleg bij het voorgestelde <code>hierarchisch.py</code> — chars → emergente woordvector → transformer → chars.
+  </footer>
+
+</div>
+</body>
+</html>
