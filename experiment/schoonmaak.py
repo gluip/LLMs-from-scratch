@@ -50,8 +50,9 @@ def maak_schoon(tekst):
 
 if __name__ == "__main__":
     for bron in sorted(RUW.glob("*.txt")):
-        schoon = maak_schoon(bron.read_text(encoding="utf-8"))
+        ruw = bron.read_text(encoding="utf-8")
+        schoon = maak_schoon(ruw)
         doel = DOEL / bron.name
         doel.write_text(schoon, encoding="utf-8")
-        print(f"{bron.name:28s} {len(bron.read_text()):>9,d} -> {len(schoon):>9,d} karakters"
+        print(f"{bron.name:28s} {len(ruw):>9,d} -> {len(schoon):>9,d} karakters"
               f"  ({len(set(schoon)):d} unieke)")

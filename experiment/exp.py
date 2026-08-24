@@ -19,9 +19,28 @@ APPARAAT = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 DATA_MAP = Path(__file__).parent / "data"
 TEKST_BESTANDEN = [        # schoongemaakt door schoonmaak.py; ruwe downloads staan in data/ruw
+    # oorspronkelijke drie boeken
     "pinkeltje.txt",
     "willem-van-oranje.txt",
     "boek-van-nu.txt",
+    # DBNL, erbij tegen het uitputten van de data: zie langer_trainen.py, 45x
+    # herhaling bij 18000 stappen op de oorspronkelijke 1,8M karakters.
+    # Max Havelaar, Sara Burgerhart, Ideen I/II/III, Camera Obscura, Huis
+    # Lauernesse en De Roos van Dekama zijn er weer uit: die zijn overwegend
+    # in pre-1947-spelling ("hy", "zy", "vryer") en gaven dat door aan het
+    # gegenereerde Nederlands. Wat overblijft zit ruim onder 2,5% zulke
+    # markers - zie de "oud"/"modern"-telling die dit uitzocht.
+    "dik-trom.txt",
+    "eline-vere.txt",
+    "ferdinand-huyck.txt",
+    "joop-ter-heul.txt",
+    "stille-kracht.txt",
+    "kleine-johannes.txt",
+    "noodlot.txt",
+    "nagelaten-bekentenis.txt",
+    "diamantstad.txt",
+    "van-oude-menschen.txt",
+    "klaasje-zevenster.txt",
 ]
 TRAIN_FRACTIE = 0.9        # aandeel van de tekst dat train wordt, de rest is test
 
