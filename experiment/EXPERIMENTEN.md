@@ -471,3 +471,58 @@ implementaties elders in het boek):
   Open vraag voor een volgende sessie: ligt bij 128/4 hetzelfde plafond-
   patroon te wachten bij meer stappen, of geeft de grotere capaciteit ook
   daar meer ruimte om te blijven verbeteren?
+
+### 20. n_embed_buiten los getest (was klakkeloos overgenomen van het char-model)
+
+- **Script:** `hierarchisch_sweep4.py`
+- **Parameters (vast):** winnende binnenconfig (n_embed_binnen=128, 4 lagen
+  enc/dec, lr=3e-3, dropout=0,1, n_stappen=18000, dataset=14 boeken);
+  variant: `n_embed_buiten` ∈ {160 (huidig, hergebruikt), 224, 288}.
+- **Aanleiding:** de binnenkant liet afnemende meeropbrengst zien (64/2->96/3:
+  +0,091 nats; 96/3->128/4: nog maar +0,041), terwijl `n_embed_buiten=160`
+  sinds het begin gewoon overgenomen was van het char-model, nooit los
+  getest voor deze architectuur.
+- **Uitkomst:** 224 -> 1,1810, 288 -> 1,1805 - **beide net iets slechter dan
+  160 (1,1730)**, en de twee liggen vrijwel op elkaar ondanks het verschil
+  in grootte. In `hierarchisch_sweep4.png` liggen de curves de hele training
+  door structureel boven de 160-lijn, niet pas toevallig aan het eind.
+- **Conclusie:** de buitenste transformer is hier niet de bottleneck -
+  groter maken helpt niet, in tegenstelling tot de binnenkant. `n_embed_buiten
+  =160` blijft staan. Dit is verder ook een compliment aan de oorspronkelijke,
+  destijds ongeteste keuze: hij bleek toevallig al goed, al was dat nooit
+  geverifieerd voordat dit experiment het bevestigde.
+
+### 21. Lagen (buiten/binnen) en ff_factor los getest - diepte is de hefboom
+
+- **Script:** `hierarchisch_sweep5.py`. Vereiste een kleine, backward-
+  compatible toevoeging aan `exp.py`: `Blok` kreeg een nieuwe `ff_factor`-
+  parameter (default `FF_FACTOR`, dus geen enkele bestaande aanroep
+  verandert) die puur een doorgeefluik is naar `FeedForwardLaag`. Smoke-
+  getest: bestaand pad ongewijzigd, nieuwe knop werkt (`factor=2.0` ->
+  binnen-dim 64 bij n_embed=32, zoals verwacht).
+- **Parameters (vast):** winnende config (n_embed_binnen=128, n_embed_buiten
+  =160, lr=3e-3, dropout=0,1, n_stappen=18000). Per variant wijzigt 1 ding
+  t.o.v. de winnaar (1,1730):
+
+| variant | nats/char | vs. winnaar |
+|---|---|---|
+| buiten 3 lagen (was 5) | 1,1710 | -0,002 |
+| buiten 8 lagen (was 5) | 1,1720 | -0,001 |
+| binnen 2 lagen (was 4, zelfde breedte 128) | 1,2153 | **+0,042** |
+| **binnen 6 lagen (was 4, zelfde breedte 128)** | **1,1527** | **-0,020** |
+| ff_factor binnen 2.0 (was 4.0) | 1,1944 | +0,021 |
+| ff_factor binnen 8.0 (was 4.0) | 1,1712 | -0,002 |
+
+- **Uitkomst:** de buitenste transformer is ongevoelig voor zowel breedte
+  (experiment 20) als diepte (3, 5 en 8 lagen liggen allemaal binnen 0,002
+  van elkaar) - geen bottleneck, op geen van beide assen. `ff_factor` breder
+  dan 4.0 helpt niet, smaller (2.0) kost duidelijk kwaliteit. **Alleen de
+  diepte van de binnenste encoder/decoder is nog een echte hefboom**: van 4
+  naar 2 lagen kost 0,042 (fors), van 4 naar 6 lagen wint nog eens 0,020.
+  Dit isoleert wat de eerdere 64/2->96/3->128/4-progressie deed: niet (alleen)
+  de breedte, vooral de diepte.
+- **Conclusie:** **nieuwe winnaar - n_embed_binnen=128, 6 lagen (was 4),
+  verder ongewijzigd: 1,1527 nats/char**, 0,108 beter dan de char-baseline
+  (1,2605). Gepromoveerd tot `model_hierarchisch.pt`. Duidelijke vervolgvraag:
+  blijft dieper nog verder winnen (8 lagen binnen), of is dit ook een
+  plafond zoals bij de buitenkant?

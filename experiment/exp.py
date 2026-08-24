@@ -312,10 +312,10 @@ class Blok(nn.Module):
     leidt — zoals we terugzagen als een hoge loss bij stap 0.
     """
 
-    def __init__(self, n_embed, gebruik_feedforward=False, losse_qk=False, losse_v=False, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0, n_koppen=1, uit_projectie=False, gebruik_rope=False, max_lengte=None):
+    def __init__(self, n_embed, gebruik_feedforward=False, losse_qk=False, losse_v=False, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0, n_koppen=1, uit_projectie=False, gebruik_rope=False, max_lengte=None, ff_factor=FF_FACTOR):
         super().__init__()
         self.attentie = AffiniteitsLaag(n_embed, losse_qk=losse_qk, losse_v=losse_v, gebruik_masker=gebruik_masker, dropout=dropout, n_koppen=n_koppen, uit_projectie=uit_projectie, gebruik_rope=gebruik_rope, max_lengte=max_lengte)
-        self.feedforward = FeedForwardLaag(n_embed, dropout=dropout) if gebruik_feedforward else None
+        self.feedforward = FeedForwardLaag(n_embed, dropout=dropout, factor=ff_factor) if gebruik_feedforward else None
         self.ln1 = nn.LayerNorm(n_embed) if gebruik_layernorm else None
         self.ln2 = nn.LayerNorm(n_embed) if (gebruik_layernorm and gebruik_feedforward) else None
 
