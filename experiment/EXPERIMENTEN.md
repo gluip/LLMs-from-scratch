@@ -18,6 +18,18 @@ laatste-positie-loss.
 (GPU/cuBLAS-nondeterminisme, ook bij vaste seed). Een verschil kleiner dan
 dat is geen echt signaal.
 
+## Vaste instellingen
+
+Deze stonden de hele sessie ongewijzigd op de standaardwaarde uit `exp.py`
+(module-constanten `N_LAGEN`, `N_KOPPEN`, etc.), bij álle experimenten
+hieronder, tenzij een entry expliciet iets anders zegt. Bij elk experiment
+staat daarom alleen wat er *voor dat experiment specifiek* toe doet — deze
+lijst hoeft niet herhaald te worden:
+
+`n_lagen=5, n_koppen=4, uit_projectie=True, gebruik_layernorm=True,
+gebruik_feedforward=True, gebruik_masker=True, ff_factor=4.0,
+aantal_train=64, aantal_test=256, train_fractie=0.9, seed=0`
+
 ## Huidige beste configuratie (`model.pt`)
 
 | instelling | waarde |
@@ -55,6 +67,9 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 1. Venstergrootte (context length): 16 / 32 / 64 / 128
 - **Script:** `venster_vgl.py`
+- **Parameters:** `n_embed=80, lengte=[16,32,64,128], dropout=0.0, lr=1e-2,
+  n_stappen=5000, losse_qk=True, losse_v=True, gebruik_positie=True,
+  dataset=3 boeken (1,8M tekens, 1.623.458 train)`
 - **Opzet:** oorspronkelijke 3 boeken (1,8M tekens), n_embed=80, lr=1e-2.
 - **Uitkomst:** 16→1,459, 32→1,403, 64→1,363, 128→1,358 (laatste positie).
   64→128 levert nog maar 0,005 op.
@@ -63,6 +78,9 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 2. n_embed (80 vs 160) x venstergrootte
 - **Script:** `embed_vgl.py`
+- **Parameters:** `n_embed=[80,160], lengte=[32,64,128], dropout=0.0, lr=1e-2,
+  n_stappen=5000, losse_qk=True, losse_v=True, gebruik_positie=True,
+  dataset=3 boeken (1,8M tekens)`
 - **Opzet:** lr vast op 1e-2 (nog niet gesweept), 5000 stappen.
 - **Uitkomst:** n_embed=160 presteerde slechter dan 80 op elk venster,
   vooral bij 128 (1,551). Train-loss van 160 was ook hoger dan van 80 →
@@ -72,6 +90,9 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 3. Leerrate x n_embed x venster (op 5000 stappen — later herzien!)
 - **Script:** `lr_vgl.py`
+- **Parameters:** `n_embed=[80,160], lengte=[64,128], dropout=0.0,
+  lr=[3e-3,5e-3,1e-2 (1e-2 hergebruikt uit experiment 2)], n_stappen=5000,
+  losse_qk=True, losse_v=True, gebruik_positie=True, dataset=3 boeken (1,8M tekens)`
 - **Opzet:** lr ∈ {3e-3, 5e-3, 1e-2}, n_embed ∈ {80, 160}, venster ∈ {64, 128}.
 - **Uitkomst:** n_embed=160, lr=5e-3, venster=64 leek de winnaar (1,315).
 - **⚠️ Waarschuwing:** dit was op maar 5000 stappen. Bij de volle 18000
@@ -82,6 +103,10 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 4. Dezelfde configuraties op de volle 18000 stappen
 - **Script:** `finale_vgl.py`
+- **Parameters:** `lengte=64, dropout=0.0, n_stappen=18000, losse_qk=True,
+  losse_v=True, gebruik_positie=True, dataset=3 boeken (1,8M tekens)`;
+  varianten: standaard `n_embed=80, lr=1e-2` vs sweep-winnaar
+  `n_embed=160, lr=5e-3`
 - **Opzet:** standaard (n_embed=80, lr=1e-2) tegen de "winnaar" uit
   experiment 3 (n_embed=160, lr=5e-3), nu op 18000 stappen.
 - **Uitkomst:** standaard: test 1,3262, train 1,1645, gat +0,16. Sweep-winnaar:
@@ -92,6 +117,9 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 5. Dropout-sweep voor n_embed=160
 - **Script:** `dropout_vgl.py`
+- **Parameters:** `n_embed=160, lengte=64, lr=5e-3, n_stappen=18000,
+  dropout=[0.0 (hergebruikt uit experiment 4), 0.1, 0.2, 0.3], losse_qk=True,
+  losse_v=True, gebruik_positie=True, dataset=3 boeken (1,8M tekens)`
 - **Opzet:** n_embed=160, lr=5e-3, 18000 stappen, dropout ∈ {0,0, 0,1, 0,2, 0,3}.
 - **Uitkomst:** 0,0→1,5874 (gat +0,70), **0,1→1,2455 (gat +0,05)**,
   0,2→1,2492, 0,3→1,2833.
@@ -101,6 +129,9 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 6. Langer trainen: 18000 vs 36000 stappen
 - **Scripts:** `beste_loss.py`, `langer_trainen.py`
+- **Parameters:** `n_embed=160, lengte=64, dropout=0.1, lr=5e-3,
+  n_stappen=[18000,36000], losse_qk=True, losse_v=True, gebruik_positie=True,
+  dataset=3 boeken (1,8M tekens)`
 - **Opzet:** winnende configuratie uit experiment 5, op de (toen nog)
   3-boeken-dataset (1,8M tekens).
 - **Uitkomst:** 18k stappen: test 1,3175. 36k stappen: test 1,3033 — vrijwel
@@ -111,6 +142,9 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 7. Dataset-uitbreiding, eerste poging: 22 boeken (verworpen)
 - **Script:** `train_uitgebreid.py` (eerste run)
+- **Parameters:** `n_embed=160, lengte=64, dropout=0.1, lr=5e-3,
+  n_stappen=18000, losse_qk=True, losse_v=True, gebruik_positie=True,
+  dataset=22 boeken (18,7M tekens, 16.866.000 train, vocab=202)`
 - **Opzet:** 19 DBNL-titels toegevoegd aan de oorspronkelijke 3, incl. Max
   Havelaar, Sara Burgerhart, Ideën I-III, Camera Obscura, Huis Lauernesse, De
   Roos van Dekama → 18,7M tekens.
@@ -122,6 +156,9 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 8. Dataset-uitbreiding, schoongemaakt: 14 boeken
 - **Script:** `train_uitgebreid.py` (na opschoning van `TEKST_BESTANDEN`)
+- **Parameters:** `n_embed=160, lengte=64, dropout=0.1, lr=5e-3,
+  n_stappen=18000, losse_qk=True, losse_v=True, gebruik_positie=True,
+  dataset=14 boeken (10,2M tekens, 9.209.727 train, vocab=148)`
 - **Opzet:** de zes probleemtitels uit experiment 7 verwijderd; 11 overige
   DBNL-titels behouden (allemaal <2,5% pre-1947-spellingmarkers) → 10,2M
   tekens, 5,7x de oorspronkelijke dataset.
@@ -134,6 +171,9 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 9. Eén gedeelde matrix vs losse Q/K/V
 - **Script:** `qkv_vgl.py`
+- **Parameters:** `n_embed=160, lengte=64, dropout=0.1, lr=5e-3,
+  n_stappen=18000, gebruik_positie=True, dataset=14 boeken (10,2M tekens)`;
+  varianten: `losse_qk=False, losse_v=False` vs `losse_qk=True, losse_v=True`
 - **Opzet:** `losse_qk=False, losse_v=False` (1 matrix W) tegen
   `losse_qk=True, losse_v=True` (volledig Q/K/V), verder de standaard-config.
 - **Uitkomst:** 1 matrix: 1,3612 (1.345.748 parameters). Losse Q/K/V:
@@ -146,6 +186,10 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 ### 10. QKV breder dan n_embed (`qkv_factor`) — verworpen
 - **Script:** `qkv_breder_vgl.py` (verwijderd na dit experiment, niet meer
   in de repo)
+- **Parameters:** `n_embed=160, lengte=64, dropout=0.1, lr=5e-3,
+  n_stappen=18000, losse_qk=True, losse_v=True, uit_projectie=True (verplicht
+  zodra qkv_factor≠1), gebruik_positie=True, dataset=14 boeken (10,2M tekens)`;
+  variant: `qkv_factor=[1.0, 1.5, 2.0]`
 - **Opzet:** nieuwe knop `qkv_factor` in `AffiniteitsLaag` om Q/K/V breder te
   maken dan n_embed (1x/1,5x/2x), los van de rest van het model.
 - **Uitkomst:** 1x: 1,2781 (test 1,3217, sanity-check ok). 1,5x: 1,2747
@@ -158,6 +202,11 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 11. Absolute positie-embeddings vs RoPE
 - **Script:** `rope_vgl.py`
+- **Parameters:** `n_embed=160, lengte=64, dropout=0.1, lr=5e-3,
+  n_stappen=18000, losse_qk=True, losse_v=True, uit_projectie=True,
+  dataset=14 boeken (10,2M tekens)`; varianten:
+  `gebruik_positie=True, gebruik_rope=False` vs
+  `gebruik_positie=False, gebruik_rope=True`
 - **Opzet:** `gebruik_positie=True, gebruik_rope=False` (huidige standaard)
   tegen `gebruik_positie=False, gebruik_rope=True`, verder identiek.
 - **Uitkomst:** zonder RoPE: test 1,3217, laatste positie 1,2781
@@ -170,6 +219,10 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 12. RoPE-extrapolatie: generaliseert het naar een langer venster?
 - **Script:** `rope_extrapolatie.py`
+- **Parameters:** zelfde als experiment 11 (`n_embed=160, dropout=0.1,
+  lr=5e-3, n_stappen=18000, losse_qk=True, losse_v=True, uit_projectie=True,
+  dataset=14 boeken`), getraind op `lengte=64`, geëvalueerd op
+  `lengte=[64, 128]` zonder hertraining (`LENGTE_LANG=128`)
 - **Opzet:** beide modellen uit experiment 11 getraind op lengte=64, daarna
   zónder hertraining geëvalueerd op lengte=128. Voor RoPE: de hoektabel
   (`rope_cos`/`rope_sin`, pure functie van positie) doorgerekend tot 128.
@@ -187,6 +240,9 @@ de oorspronkelijke 3 boeken i.p.v. 14, 1,2455).
 
 ### 13. RoPE-model opgeslagen als `model.pt`
 - **Script:** `train_rope.py`
+- **Parameters:** `n_embed=160, lengte=64, dropout=0.1, lr=5e-3,
+  n_stappen=18000, losse_qk=True, losse_v=True, uit_projectie=True,
+  gebruik_positie=False, gebruik_rope=True, dataset=14 boeken (10,2M tekens)`
 - **Opzet:** de winnende configuratie uit experiment 11 nogmaals getraind
   (18000 stappen, 14-boeken-dataset) en opgeslagen.
 - **Uitkomst:** laatste-positie-loss 1,2605 — reproduceerde experiment 11
