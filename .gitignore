@@ -40,10 +40,6 @@ ch07/04_preference-tuning-with-dpo/reward margins-plot.pdf
 model.pth
 appendix-A/01_main-chapter-code/model.pth
 
-# nieuwe checkpoints/resultaten hier voortaan niet meer committen; model.pt en
-# model_3boeken.pt zijn al getrackt en blijven dat totdat ze bewust untracked worden
-experiment/*.pt
-
 appendix-E/01_main-chapter-code/gpt2
 
 ch05/01_main-chapter-code/gpt2/
