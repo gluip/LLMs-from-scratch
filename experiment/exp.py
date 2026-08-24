@@ -113,6 +113,43 @@ def maak_batch(ids, lengte=20, aantal=10, generator=None):
     return brok[:, :-1], brok[:, 1:]
 
 
+def rope_hoeken(kop_dim, max_lengte, basis=10_000):
+    """Precomputeert cos/sin voor RoPE: één hoek per (positie, dimensie-paar).
+
+    Elke twee dimensies van een Q- of K-vector vormen samen een punt in het
+    platte vlak; hoe verder naar achteren in de vector, hoe langzamer dat
+    punt draait naarmate de positie oploopt (net als de secondewijzer versus
+    de urenwijzer van een klok). `basis` bepaalt hoe traag de traagste paren
+    draaien; 10.000 is de standaardwaarde uit het RoPE-paper en ook wat de
+    Llama/Qwen3/Gemma3-implementaties elders in dit repo gebruiken
+    (ch05/07_gpt_to_llama).
+    """
+    assert kop_dim % 2 == 0, "kop_dim moet even zijn voor RoPE (dimensies komen in paren)"
+    inv_freq = 1.0 / (basis ** (torch.arange(0, kop_dim, 2).float() / kop_dim))
+    posities = torch.arange(max_lengte)
+    hoeken = posities.unsqueeze(1) * inv_freq.unsqueeze(0)  # (max_lengte, kop_dim/2)
+    hoeken = torch.cat([hoeken, hoeken], dim=1)              # (max_lengte, kop_dim)
+    return torch.cos(hoeken), torch.sin(hoeken)
+
+
+def pas_rope_toe(x, cos, sin):
+    """Draait elk (Q- of K-)paar dimensies over de hoek van zijn positie.
+
+    x: (batch, n_koppen, T, kop_dim). Het inproduct van twee zo geroteerde
+    vectoren hangt daarna alleen nog af van het positieverschil tussen ze,
+    niet van hun absolute posities — dat is de kern van RoPE: relatieve
+    afstand komt "gratis" mee uit de wiskunde, in plaats van dat het model
+    per absolute positie apart moet leren wat die betekent.
+    """
+    T = x.shape[-2]
+    kop_dim = x.shape[-1]
+    x1, x2 = x[..., :kop_dim // 2], x[..., kop_dim // 2:]
+    cos_t = cos[:T].unsqueeze(0).unsqueeze(0)  # (1, 1, T, kop_dim)
+    sin_t = sin[:T].unsqueeze(0).unsqueeze(0)
+    geroteerd = torch.cat((-x2, x1), dim=-1)
+    return x * cos_t + geroteerd * sin_t
+
+
 class AffiniteitsLaag(nn.Module):
     """Eén stackbare attention-laag: neemt (batch, T, n_embed) en geeft ook
     (batch, T, n_embed) terug, zodat je er meerdere achter elkaar kunt zetten.
@@ -156,10 +193,26 @@ class AffiniteitsLaag(nn.Module):
     begin van het woord, in plaats van dat één verdeling alles moet doen.
     `uit_projectie` (W_o) mengt de koppen daarna weer met elkaar — zonder die
     stap blijven ze los van elkaar staan en levert opsplitsen weinig op.
+
+    Met `gebruik_rope=True` vervangt RoPE (rotary position embeddings) de
+    absolute positie-informatie: in plaats van dat het model bij elke
+    absolute positie een eigen geleerde vector leert (zie `gebruik_positie`
+    in AffiniteitsModel), worden Q en K vóór het inproduct geroteerd met een
+    hoek die van hun positie afhangt (zie `pas_rope_toe`). Voordeel: het
+    inproduct van twee geroteerde vectoren hangt daarna alleen af van hun
+    onderlinge afstand, niet van hun absolute positie in de reeks — een
+    patroon dat drie karakters terug staat, hoeft dus maar één keer geleerd
+    te worden in plaats van apart per absolute positie. Ook verdwijnt het
+    harde plafond van `max_lengte`: `pos_embed` heeft geen rijen voorbij die
+    grens (vandaar de afkapping in `genereer`), maar RoPE-hoeken kunnen voor
+    elke positie worden uitgerekend. In combinatie met `gebruik_positie=True`
+    is niet getest; voor een eerlijke vergelijking hoort daar `gebruik_positie
+    =False` bij, anders krijgt het model twee keer positie-informatie door
+    elkaar en meet je niet meer wat RoPE alleen bijdraagt.
     """
 
     def __init__(self, n_embed, losse_qk=False, losse_v=False, gebruik_masker=True, dropout=0.0,
-                 n_koppen=1, uit_projectie=False):
+                 n_koppen=1, uit_projectie=False, gebruik_rope=False, max_lengte=None):
         super().__init__()
         assert n_embed % n_koppen == 0, "n_embed moet deelbaar zijn door n_koppen"
         self.n_embed = n_embed
@@ -167,6 +220,7 @@ class AffiniteitsLaag(nn.Module):
         self.kop_dim = n_embed // n_koppen
         self.losse_qk = losse_qk
         self.gebruik_masker = gebruik_masker
+        self.gebruik_rope = gebruik_rope
         self.dropout = nn.Dropout(dropout)
         if losse_qk:
             self.Q = nn.Linear(n_embed, n_embed, bias=False)
@@ -175,6 +229,11 @@ class AffiniteitsLaag(nn.Module):
             self.W = nn.Linear(n_embed, n_embed, bias=False)  # de ene gedeelde matrix
         self.V = nn.Linear(n_embed, n_embed, bias=False) if losse_v else None
         self.uit_proj = nn.Linear(n_embed, n_embed) if uit_projectie else None
+        if gebruik_rope:
+            assert max_lengte is not None, "max_lengte is nodig om de RoPE-hoeken vooraf te berekenen"
+            cos, sin = rope_hoeken(self.kop_dim, max_lengte)
+            self.register_buffer("rope_cos", cos)  # geen geleerde parameters, dus als buffer
+            self.register_buffer("rope_sin", sin)  # (blijft wel mee met .to(device) en state_dict)
 
     def _splits(self, t):
         """(batch, T, n_embed) -> (batch, n_koppen, T, kop_dim)."""
@@ -191,6 +250,9 @@ class AffiniteitsLaag(nn.Module):
             gedeeld = self.W(h)             # (batch, T, n_embed), geprojecteerd
             q = k = self._splits(gedeeld)
             basis = gedeeld
+        if self.gebruik_rope:
+            q = pas_rope_toe(q, self.rope_cos, self.rope_sin)
+            k = pas_rope_toe(k, self.rope_cos, self.rope_sin)
         affiniteit = q @ k.transpose(-2, -1)            # (batch, n_koppen, T, T)
         affiniteit = affiniteit / self.kop_dim ** 0.5   # schaling, per kop
 
@@ -250,9 +312,9 @@ class Blok(nn.Module):
     leidt — zoals we terugzagen als een hoge loss bij stap 0.
     """
 
-    def __init__(self, n_embed, gebruik_feedforward=False, losse_qk=False, losse_v=False, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0, n_koppen=1, uit_projectie=False):
+    def __init__(self, n_embed, gebruik_feedforward=False, losse_qk=False, losse_v=False, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0, n_koppen=1, uit_projectie=False, gebruik_rope=False, max_lengte=None):
         super().__init__()
-        self.attentie = AffiniteitsLaag(n_embed, losse_qk=losse_qk, losse_v=losse_v, gebruik_masker=gebruik_masker, dropout=dropout, n_koppen=n_koppen, uit_projectie=uit_projectie)
+        self.attentie = AffiniteitsLaag(n_embed, losse_qk=losse_qk, losse_v=losse_v, gebruik_masker=gebruik_masker, dropout=dropout, n_koppen=n_koppen, uit_projectie=uit_projectie, gebruik_rope=gebruik_rope, max_lengte=max_lengte)
         self.feedforward = FeedForwardLaag(n_embed, dropout=dropout) if gebruik_feedforward else None
         self.ln1 = nn.LayerNorm(n_embed) if gebruik_layernorm else None
         self.ln2 = nn.LayerNorm(n_embed) if (gebruik_layernorm and gebruik_feedforward) else None
@@ -274,10 +336,11 @@ class AffiniteitsModel(nn.Module):
     dat karakter", niet "hoe ver terug stond het". Met `gebruik_positie=True`
     krijgt elke positie 0..T-1 zijn eigen geleerde vector (net als de letters
     dat hebben), opgeteld bij de letter-embedding — zodat het model afstand
-    kan leren meewegen.
+    kan leren meewegen. `gebruik_rope=True` is een alternatief voor diezelfde
+    behoefte, zie de docstring van AffiniteitsLaag: gebruik niet allebei tegelijk.
     """
 
-    def __init__(self, vocab_size, n_embed=12, n_lagen=1, gebruik_positie=True, gebruik_feedforward=False, losse_qk=False, losse_v=False, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0, n_koppen=1, uit_projectie=False, max_lengte=128):
+    def __init__(self, vocab_size, n_embed=12, n_lagen=1, gebruik_positie=True, gebruik_feedforward=False, losse_qk=False, losse_v=False, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0, n_koppen=1, uit_projectie=False, gebruik_rope=False, max_lengte=128):
         super().__init__()
         self.gebruik_positie = gebruik_positie
         self.embed = nn.Embedding(vocab_size, n_embed)
@@ -285,7 +348,7 @@ class AffiniteitsModel(nn.Module):
             self.pos_embed = nn.Embedding(max_lengte, n_embed)
         self.embed_dropout = nn.Dropout(dropout)
         self.lagen = nn.ModuleList([
-            Blok(n_embed, gebruik_feedforward, losse_qk, losse_v, gebruik_layernorm, gebruik_masker, dropout, n_koppen, uit_projectie) for _ in range(n_lagen)
+            Blok(n_embed, gebruik_feedforward, losse_qk, losse_v, gebruik_layernorm, gebruik_masker, dropout, n_koppen, uit_projectie, gebruik_rope, max_lengte) for _ in range(n_lagen)
         ])
         self.uit = nn.Linear(n_embed, vocab_size)  # enige plek die naar vocab_size gaat
 
@@ -360,7 +423,7 @@ def train_affiniteitsmodel(
     n_lagen, n_embed, train_ids, test_ids, tokenizer, lengte=LENGTE,
     gebruik_positie=GEBRUIK_POSITIE, gebruik_feedforward=GEBRUIK_FEEDFORWARD,
     losse_qk=LOSSE_QK, losse_v=LOSSE_V, gebruik_layernorm=False, gebruik_masker=True, dropout=0.0,
-    n_koppen=N_KOPPEN, uit_projectie=UIT_PROJECTIE,
+    n_koppen=N_KOPPEN, uit_projectie=UIT_PROJECTIE, gebruik_rope=False,
     aantal_train=BATCH_AANTAL, aantal_test=TEST_BATCH_AANTAL,
     lr=LEERRATE, n_stappen=N_STAPPEN, eval_interval=EVAL_INTERVAL, seed=SEED,
     apparaat=None,
@@ -380,7 +443,7 @@ def train_affiniteitsmodel(
         tokenizer.vocab_size, n_embed=n_embed, n_lagen=n_lagen,
         gebruik_positie=gebruik_positie, gebruik_feedforward=gebruik_feedforward, losse_qk=losse_qk, losse_v=losse_v,
         gebruik_layernorm=gebruik_layernorm, gebruik_masker=gebruik_masker, dropout=dropout,
-        n_koppen=n_koppen, uit_projectie=uit_projectie, max_lengte=lengte,
+        n_koppen=n_koppen, uit_projectie=uit_projectie, gebruik_rope=gebruik_rope, max_lengte=lengte,
     ).to(apparaat)
     train_ids = train_ids.to(apparaat)
     test_ids = test_ids.to(apparaat)
