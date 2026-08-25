@@ -58,24 +58,29 @@ niet hetzelfde bestand, andere tokenizer-benadering, ander praat-script
 
 | instelling | waarde |
 |---|---|
-| n_embed_buiten | 160 (5 lagen, 4 koppen, RoPE - matcht `model.pt`) |
-| n_embed_binnen (encoder/decoder) | 128, 4 lagen elk, 4 koppen |
-| MAX_BROK_LENGTE / BROK_VENSTER | 16 / 32 (~64 karakters) |
-| dropout / lr | 0,1 / **3e-3** (5e-3 gaf instabiliteit op deze grootte, zie experiment 17/18) |
+| n_embed_buiten | 160, **5 lagen**, 4 koppen, RoPE (breedte/diepte hier getest, geen bottleneck - experiment 20/21) |
+| n_embed_binnen (encoder/decoder) | 128, **6 lagen** elk, 4 koppen (diepte was de belangrijkste hefboom - experiment 21/22) |
+| MAX_BROK_LENGTE / BROK_VENSTER | 16 / **48** (~144 karakters - experiment 23/24) |
+| dropout / lr | 0,1 / 3e-3 (5e-3 gaf instabiliteit bij 128/4, zie experiment 17/18) |
 | n_stappen | 18000 |
 | dataset | zelfde 14 boeken, 10,2M karakters |
-| **nats/karakter (inhoud, EOW uitgesloten)** | **1,1730** — **wint van `model.pt` (1,2605)** met 0,088 |
+| **nats/karakter (inhoud, EOW uitgesloten)** | **1,1288** — **wint van `model.pt` (1,2605)** met 0,132 |
 
 `HierarchischModel.forward` dedupliceert sinds experiment 18 de encoder-
 aanroep (`torch.unique(..., dim=0)`) - ~70% van de brokken in een batch is
 een letterlijke herhaling (spaties, "de", "een", ...), dus dat scheelt 27%
-rekentijd per stap zonder de uitkomst te veranderen.
+rekentijd per stap zonder de uitkomst te veranderen. `exp.py`'s `Blok` kreeg
+sinds experiment 21 een `ff_factor`-parameter (default ongewijzigd).
 
-Back-ups van eerdere versies: `model_hierarchisch_v1.pt` (64/2, 18000
-stappen, 1,3004), `model_hierarchisch_v2_18k.pt` (96/3, 18000 stappen,
-1,2139), `model_hierarchisch_v3_36k.pt` (96/3, 36000 stappen, 1,1882 - bleek
-een capaciteitsplafond, zie experiment 19: ook 72000 stappen kwam niet lager
-dan 1,1748).
+Drie assen zijn uitputtend gesweept (breedte, diepte, venstergrootte, elk
+aan binnen- en/of buitenkant) - zie experiment 20-24 voor de volledige
+zoektocht en de samenvattende tabel in experiment 24. Nog open: dropout op
+de binnenkant, de niet-gemaskeerde PAD-posities in de encoder-attention, en
+`MAX_BROK_LENGTE` zelf (nooit los getest).
+
+Back-ups van tussentijdse versies: `model_hierarchisch_v4_128-4.pt` (128/4
+binnen, venster 32, 1,1730), `model_hierarchisch_v5_binnen6.pt` (128/6
+binnen, venster 32, 1,1527 - vóór de venster-uitbreiding naar 48).
 
 ## Geprobeerd en verworpen — niet zomaar opnieuw proberen
 
@@ -572,3 +577,28 @@ implementaties elders in het boek):
   (1,2605). Gepromoveerd tot `model_hierarchisch.pt`. Gegeven de duidelijke
   trend (16 fors slechter, 48 beter) is de logische vervolgvraag: helpt
   nóg meer venster (64+) verder, of is dit ook een plafond?
+
+### 24. BROK_VENSTER=64 - de trend vlakt af
+
+- **Script:** `hierarchisch_sweep8.py`, vervolg op experiment 23.
+- **Uitkomst:** **1,1316** - vrijwel gelijk aan de 48-winnaar (1,1288),
+  verschil binnen de meetruis. De reeks 16(1,2327)->32(1,1527)->48(1,1288)
+  ->64(1,1316) laat duidelijk afnemende en dan omslaande winst zien: -0,080,
+  dan -0,024, dan +0,003. `BROK_VENSTER=48` is het optimum op deze as.
+- **Conclusie:** geen nieuwe winnaar, `BROK_VENSTER=48` blijft de
+  standaard. Drie assen zijn nu uitputtend verkend (breedte, diepte,
+  venstergrootte) en hebben allemaal hun plafond laten zien. Overzicht van
+  de hele zoektocht (char-baseline 1,2605):
+
+| stap | wijziging | nats/char |
+|---|---|---|
+| start (64/2, ongesweept) | - | 1,3050 |
+| binnenkant breder+dieper | 64/2 -> 96/3 -> 128/4 | 1,2139 -> 1,1730 |
+| leerrate gefixt | 5e-3 -> 3e-3 (128/4 werd instabiel op 5e-3) | 1,1730 |
+| binnenkant dieper (breedte gelijk) | 4 -> 6 lagen | 1,1527 |
+| venster groter | 32 -> 48 brokken | **1,1288** |
+
+  Nog open (niet meer opgepakt deze sessie, tijd op): dropout op de
+  binnenste encoder/decoder, de niet-gemaskeerde PAD-posities in de
+  encoder-attention, en `MAX_BROK_LENGTE` (nu 16, nooit los getest - alleen
+  `BROK_VENSTER` is dat wel geweest).
