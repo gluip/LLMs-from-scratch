@@ -551,3 +551,24 @@ implementaties elders in het boek):
   aanpak (bv. `MAX_BROK_LENGTE`/`BROK_VENSTER`, dropout op de binnenkant, of
   de niet-gemaskeerde PAD-posities in de encoder-attention - alle drie nog
   open staande punten uit eerdere experimenten).
+
+### 23. BROK_VENSTER los getest - meer context helpt, net als bij het char-model
+
+- **Script:** `hierarchisch_sweep7.py`. Winnende architectuur (128/6 binnen,
+  160/5 buiten, lr=3e-3) vast; alleen `BROK_VENSTER` varieert (16/32/48).
+  `MAX_BROK_LENGTE=16` ongewijzigd, dus dezelfde brok-tensor hergebruikt.
+- **Aanleiding:** `BROK_VENSTER=32` was vanaf het begin gekozen om qua
+  *karakters* te matchen met het char-model se `LENGTE=64`, nooit los
+  getest - en bij het char-model was de venstergrootte destijds de
+  waardevolste knop van allemaal.
+- **Uitkomst:** `BROK_VENSTER=16`: **1,2327 - fors slechter** (+0,080).
+  `BROK_VENSTER=48`: **1,1288 - beter** (-0,024). Een duidelijke,
+  monotone trend: meer woord-context helpt, net als bij het char-model.
+  In `hierarchisch_sweep7.png` ligt de 48-curve de hele training door
+  structureel onder zowel de 16- als de 32-lijn, niet toevallig pas aan
+  het eind.
+- **Conclusie:** **nieuwe winnaar - BROK_VENSTER=48 (was 32), verder
+  ongewijzigd: 1,1288 nats/char**, 0,132 beter dan de char-baseline
+  (1,2605). Gepromoveerd tot `model_hierarchisch.pt`. Gegeven de duidelijke
+  trend (16 fors slechter, 48 beter) is de logische vervolgvraag: helpt
+  nóg meer venster (64+) verder, of is dit ook een plafond?
