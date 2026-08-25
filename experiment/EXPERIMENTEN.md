@@ -526,3 +526,28 @@ implementaties elders in het boek):
   (1,2605). Gepromoveerd tot `model_hierarchisch.pt`. Duidelijke vervolgvraag:
   blijft dieper nog verder winnen (8 lagen binnen), of is dit ook een
   plafond zoals bij de buitenkant?
+
+### 22. 8 lagen binnen, en een goedkopere combinatie geprobeerd
+
+- **Script:** `hierarchisch_sweep6.py`
+- **Varianten:** `n_lagen_enc/dec=8` (nog dieper dan de 6-lagen-winnaar) en
+  een gecombineerde variant (binnen 6 lagen + buiten 3 lagen, in de
+  veronderstelling dat de buitenkant toch ongevoelig was voor diepte -
+  experiment 21 - dus goedkoper zou moeten kunnen zonder kwaliteit te
+  verliezen).
+- **Uitkomst:** 8 lagen binnen: **1,1551** - vrijwel gelijk aan de 6-lagen-
+  winnaar (1,1527), verschil binnen de meetruis. Diepte is dus ook hier
+  uitgewerkt: 6 lagen is het optimum op deze as, net zoals eerder bij
+  n_embed_buiten en n_lagen_buiten een plafond bleek. Gecombineerd (6
+  binnen/3 buiten): **1,1682 - 0,016 slechter** dan 6/5. De vereenvoudiging
+  pakt dus niet gunstig uit: hoewel buiten-diepte alléén (bij binnen=4)
+  geen verschil maakte, kost het blijkbaar wél iets zodra de binnenkant
+  krachtiger is (6 lagen) - een interactie-effect dat losse tests per as
+  niet laten zien.
+- **Conclusie:** de winnende configuratie blijft **n_embed_binnen=128, 6
+  lagen encoder/decoder, n_embed_buiten=160, 5 lagen buiten: 1,1527
+  nats/char**. Twee assen zijn nu uitputtend verkend (breedte en diepte, aan
+  beide kanten) en leveren geen verdere winst meer op zonder een andere
+  aanpak (bv. `MAX_BROK_LENGTE`/`BROK_VENSTER`, dropout op de binnenkant, of
+  de niet-gemaskeerde PAD-posities in de encoder-attention - alle drie nog
+  open staande punten uit eerdere experimenten).
