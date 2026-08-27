@@ -1028,3 +1028,88 @@ activaties geven grote gradiënten geven grotere gewichten. Vandaar in
 `activaties.py`: delen door 2, `clip_grad_norm_` op 1,0, en een controle op
 niet-eindige loss zodat een ontspoorde run zichtbaar wordt in plaats van
 stilletjes onzin te geven.
+
+---
+
+## 15. Vorm leren met poorten, en willekeurig groeien (`leerbare_vorm.py`, `gebruik_of_verlies.py`)
+
+**Vraag 1 — kan het netwerk zijn eigen diepte kiezen?** Vier blokken
+aangeboden, elk met een leerbare poort: `h = h + alfa * blok(h)`, plus een
+straf op `|alfa|`. Gaat alfa naar nul, dan is dat blok er effectief niet meer
+— en anders dan bij snoeien loopt die keuze wél gewoon mee in backprop.
+
+**Uitkomst: de opzet deugt niet.** De poorten zakken netjes naar 0,08–0,25,
+maar dat betekent niets:
+
+| blok | alfa | ‖blok-uitvoer‖ | alfa × norm |
+|---|---|---|---|
+| 0 | 0,247 | 6,16 | 1,52 |
+| 3 | **0,140** | **21,46** | **3,01** |
+
+Het blok schaalt zijn interne gewichten precies op naarmate de poort zakt. De
+werkelijke bijdrage neemt zelfs toe. `alfa` is dus niet te onderscheiden van
+de interne gewichtsschaal en meet niets.
+
+De eerlijke toets is ablatie — zet een poort echt op nul:
+
+| uitgezet | test |
+|---|---|
+| niets | 98% |
+| blok 0 attentie | 53% |
+| elk ander blok | 2–12% |
+
+**Alle acht poorten zijn dragend.** De lezing "7 open, 1 dicht" was fout.
+Reparatie zou zijn: het blok normaliseren vóór de poort, zodat alfa de enige
+schaalknop is. Niet uitgevoerd.
+
+**Poorten kunnen alleen snoeien, niet groeien.** Een poort kan een bestaand
+blok uitschakelen maar geen nieuw blok maken; je moet ruim inkopen en het
+netwerk laten kiezen (zoals DARTS). Groeien kán er wel mee, door een blok toe
+te voegen met alfa klein — het model doet dan bijna hetzelfde en backprop mag
+beslissen of de poort opengaat. Bij alfa precies nul werkt dat niet: de
+gewichten *binnen* dat blok krijgen dan geen gradiënt.
+
+**Vraag 2 — hoe groot moet de mutatie zijn bij het splitsen?** In experiment
+13 leverde splitsen niets op, vermoedelijk omdat identieke kopieën identieke
+gradiënten krijgen en dus identiek blijven. Mutatiegrootte gevarieerd:
+
+| mutatie | direct na splitsen | na bijschaven |
+|---|---|---|
+| 0,00 | 93% (functie behouden) | 92% |
+| 0,10 | 93% | 92% |
+| 0,50 | 88% | 93% |
+| 1,00 | **48%** | 93% |
+
+Bij mutatie 1,00 stort het model eerst in en klimt het volledig terug, dus de
+kopie wordt écht een nieuwe vrijheidsgraad. Maar het bijschaven brengt hem
+precies terug tot waar hij al was: **+1 procentpunt.** De rem zat niet in de
+mutatiegrootte.
+
+**Vraag 3 — willekeurig laten aangroeien, en wat niet gebruikt wordt sterft
+af.** Vast budget actieve eenheden; elke 1000 stappen de zwakste 20% eruit en
+evenveel wíllekeurige nieuwe erin. Geen aparte evaluatie nodig: draagt een
+nieuwe eenheid niets bij, dan is hij de volgende ronde weer de zwakste. De
+training zelf is de selectie. (Dit is in de kern SET/RigL.)
+
+Dat is ook waarom het goedkoop is. Gemeten: de belang-meting over alle 128
+eenheden kost **1,0 ms**, oftewel 1,3 trainingsstappen — 0,004% van één run.
+Blind muteren mét aparte evaluatie zou 13× tot 333× een volledige training
+kosten, en de zoekruimte is 2^128.
+
+| aanpak | budget 32 | 16 | 8 | 4 |
+|---|---|---|---|---|
+| dynamisch groeien/afsterven | 97% | 97% | 93% | 95% |
+| vast willekeurig deel | 97% | 96% | 96% | 95% |
+| dicht model, vanaf nul | 97% | 94% | 94% | 96% |
+| *stapsgewijs gesnoeid (exp. 13)* | *87%* | | | |
+
+**Conclusie.** Gebruik-of-verlies haalt het beste resultaat (97%) en is ruim
+beter dan snoeien-vanaf-groot (87%). Maar het verslaat een vást willekeurig
+deel niet, ook niet bij een krap budget. Alle varianten liggen binnen de ruis
+van elkaar.
+
+**Wat dat betekent voor de vraagstelling.** Deze taak is te makkelijk om de
+methoden te onderscheiden: 4 tot 32 eenheden geven allemaal 93–97%, dus het
+maakt niet uit wélke je kiest. Alleen snoeien-vanaf-groot is aantoonbaar
+slecht. Om iets zinnigs over topologie-leren te zeggen is een taak nodig waar
+het model echt tegen zijn capaciteitsgrens aan zit.
