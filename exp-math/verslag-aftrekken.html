@@ -370,8 +370,9 @@ softmax volledig op 'a'   &rarr;   gewichten (+1, &minus;1, &minus;1, &minus;1)
   </table></div>
   <p class="etiket">n_embed=16, positie + aandacht, 10 seeds</p>
 
-  <p>De voorspelling klopt, en het is bovendien <strong>3,6 keer zuiniger</strong> dan de
-  <code>W_o</code>-route: 401 parameters tegen 1.457. Het gewicht op <code>a</code> wordt daarbij
+  <p>De voorspelling klopt, en het is bovendien <strong>fors zuiniger</strong> dan de
+  <code>W_o</code>-route: 401 parameters tegen 1.457 bij gelijke opzet &mdash; en met
+  <span class="mono">n_embed=4</span> zelfs 153, waar de <code>W_o</code>-route al lang afhaakt. Het gewicht op <code>a</code> wordt daarbij
   vrijwel constant &mdash; <span class="mono">&minus;0,992</span> met een spreiding van
   <span class="mono">0,0061</span>, tegen <span class="mono">0,1174</span> met softmax. Het model
   heeft de inhoudsafhankelijke selector niet meer nodig, want een vast &plusmn;1-patroon volstaat.</p>
@@ -598,7 +599,7 @@ tanh          tanh(aff)                    som vrij     geen normalisatie</pre>
 
   <div class="cijferrij">
     <div class="cijfer"><span class="waarde">49</span><span class="label">parameters &mdash; optellen</span></div>
-    <div class="cijfer"><span class="waarde">401</span><span class="label">parameters &mdash; aftrekken</span></div>
+    <div class="cijfer"><span class="waarde">153</span><span class="label">parameters &mdash; aftrekken</span></div>
     <div class="cijfer"><span class="waarde">553</span><span class="label">parameters &mdash; allebei</span></div>
     <div class="cijfer"><span class="waarde">2</span><span class="label">koppen minimaal nodig</span></div>
   </div>

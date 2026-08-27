@@ -28,6 +28,7 @@ BEWERKINGEN = {                      # naam -> (bestand, teken)
     "aftrekken":        ("aftrekken.txt", "-"),
     "vermenigvuldigen": ("vermenigvuldigen.txt", "*"),
     "beide":            ("optellen_aftrekken.txt", "+/-"),   # 200 regels, twee bewerkingen door elkaar
+    "drie":             ("drie_bewerkingen.txt", "+/-/*"),    # 300 regels, alle drie door elkaar
 }
 
 LENGTE = 4                  # "9 * 9 =" is 4 tokens, het antwoord is de 5e

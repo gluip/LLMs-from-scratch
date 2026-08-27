@@ -9,7 +9,7 @@ Dit spoor staat los van het char-level taalmodel in `../experiment/`.
 
 ---
 
-## Huidige staat (bijgewerkt na experiment 10)
+## Huidige staat (bijgewerkt na experiment 11)
 
 Kort overzicht om weer in te komen zonder het hele logboek te lezen.
 
@@ -37,10 +37,13 @@ Python de uitvoer en zie je minutenlang niets.
 | optellen | geen (vaste middeling volstaat) | 2 | **49** |
 | aftrekken | positie + aandacht + `soort="tanh"` | 4 | **153** |
 | optellen én aftrekken | positie + aandacht + `W_o`, 4 koppen | 8 | **553** |
+| alle drie (`+ - *`) | positie + aandacht + `W_o` + `ff`, 8 koppen | 32 | 14.337 &mdash; 98%, geen 100% |
 
-Alle drie 100% op de achtergehouden sommen, bij elke seed. Gemeenschappelijk:
-`weight_decay=0,3`, `n_stappen=10000`, `lr=3e-3` cosine, `batch=16`,
-splitsing 80/20 met `SPLITS_SEED=42`, 10 seeds.
+De eerste drie zijn 100% bij elke seed; de gecombineerde taak met
+vermenigvuldigen blijft op 98% steken (zie experiment 11 — dat is een
+bereikprobleem, geen architectuurprobleem). Gemeenschappelijk:
+`weight_decay=0,3`, `lr=3e-3` cosine, `batch=16`, splitsing 80/20 met
+`SPLITS_SEED=42`. `n_stappen=10000`, behalve bij de drie bewerkingen: 30.000.
 
 ### De vier dingen die er echt toe doen
 
@@ -52,15 +55,19 @@ splitsing 80/20 met `SPLITS_SEED=42`, 10 seeds.
 3. **De aandacht doet per taak iets anders** (exp. 5, 7, 10): middelen bij
    optellen, kiezen bij aftrekken, schakelen op het operator-teken bij beide.
 4. **De taak bepaalt de architectuur.** Wat bij optellen weggelaten kon
-   worden, is bij aftrekken het verschil tussen 9% en 100%.
+   worden, is bij aftrekken het verschil tussen 9% en 100%. En de
+   feedforward, die bij optellen én aftrekken overbodig was, scheelt bij
+   vermenigvuldigen dertig procentpunt (exp. 11) — precies omdat dat de enige
+   niet-lineaire bewerking van de drie is.
 
 ### Nog te doen
 
-- **Vermenigvuldigen.** `data/vermenigvuldigen.txt` staat klaar, 100 regels,
-  39 tokens. Nog niet betrouwbaar gemeten: één afgebroken run gaf `kaal` 4% en
-  `aandacht` 91%. Voorspelling: commutatief maar níet lineair, dus dit zou
-  juist de feedforward moeten afdwingen en positie-informatie overbodig laten.
-  Let op de extrapolatieval: 1, 25, 49, 64 en 81 komen elk maar één keer voor.
+- **Het bereikprobleem bij drie bewerkingen** (exp. 11). Het model blijft op
+  98% steken en de fouten zitten allemaal bij antwoorden vlak bij nul, omdat
+  het bereik nu −9..81 is. Te omzeilen door het antwoord anders te coderen
+  (cijfer voor cijfer, of een kop per bewerking) — maar dat verandert de taak.
+- **Vermenigvuldigen apart.** `data/vermenigvuldigen.txt` (100 regels) is nog
+  niet los gemeten, alleen in de gecombineerde set.
 - **`tanh` bij lange reeksen.** Wint bij de losse bewerkingen maar faalt bij
   de gecombineerde taak (exp. 9–10), en er is niets dat de schaal beteugelt
   als T groeit. Vraagt om een taak met variabele lengte.
@@ -737,3 +744,72 @@ mogelijk maakt. Welk van de twee overheerst hangt af van de taak.
 
 n_embed=4 met 4 koppen komt op 213 parameters en 100% gemiddeld, maar de
 laagste seed haalt 98% — net niet betrouwbaar.
+
+---
+
+## 11. Vermenigvuldigen erbij: de feedforward wordt eindelijk nodig (`rekenen.py`, bewerking `"drie"`)
+
+**Opzet.** `data/drie_bewerkingen.txt`: alle drie de tabellen achter elkaar,
+300 regels, 53 tokens, antwoorden van −9 t/m 81. Splitsing 20%, dus 240 train
+en 60 test, netjes verdeeld (76 keer `+`, 85 keer `-`, 79 keer `*`).
+**Bewust met gewone softmax**, niet met `tanh`: dat laatste won bij de losse
+bewerkingen maar faalde bij de gecombineerde taak (experiment 10).
+
+Twee antwoorden komen alleen in de testset voor: 21 en 45. Dat zijn allebei
+producten (3·7 en 5·9) waarvan beide volgordes in test belandden.
+
+**Uitkomst 1 — de feedforward doet er voor het eerst toe.** 5 seeds:
+
+| onderdelen | n_embed | train | test | min | params |
+|---|---|---|---|---|---|
+| kaal | 16 | 9% | 5% | 3% | 1.121 |
+| positie + aandacht + W_o | 16 | 23% | 25% | 18% | 1.969 |
+| + 4 koppen | 16 | 63% | 53% | 12% | 1.969 |
+| **+ feedforward** | 16 | 93% | **83%** | 75% | 4.097 |
+| + 4 koppen (geen ff) | 32 | 80% | 69% | 53% | 5.985 |
+| **+ feedforward** | 32 | 98% | **91%** | 85% | 14.337 |
+
+Bij gelijke grootte scheelt de feedforward dertig procentpunt (53% → 83% bij
+n_embed=16, 69% → 91% bij n_embed=32). Dat is de voorspelling uit experiment
+6 die uitkomt: optellen en aftrekken zijn lineair en konden de ReLU missen,
+vermenigvuldigen is dat niet.
+
+**Uitkomst 2 — langer trainen helpt, groter maken niet.**
+
+| n_embed | koppen | stappen | test | min | params |
+|---|---|---|---|---|---|
+| 32 | 8 | 10.000 | 94% | 90% | 14.337 |
+| **32** | **8** | **30.000** | **98%** | **95%** | **14.337** |
+| 64 | 8 | 30.000 | 97% | 95% | 53.249 |
+| 64 | 16 | 30.000 | 97% | 95% | 53.249 |
+
+Bijna vier keer zoveel parameters levert niets op; drie keer zo lang trainen
+wel.
+
+**Uitkomst 3 — wat er nog misgaat is niet wat je zou denken.** Bij de beste
+configuratie, 5 seeds:
+
+| bewerking | goed | aantal in test |
+|---|---|---|
+| `-` | **100%** | 15 |
+| `+` | 99% | 24 |
+| `*` | 95% | 21 |
+
+De resterende fouten zijn **allemaal antwoorden vlak bij nul**: `0*9`, `0*8`,
+`1*1`, `0+0` — telkens één of twee mis. De twee antwoorden die alleen in de
+testset staan (21 en 45) worden juist wél goed geleerd.
+
+**Conclusie.** De bottleneck is niet meer de architectuur maar het
+**dynamisch bereik**. Het antwoord moet nu ergens tussen −9 en 81 liggen en op
+een halve eenheid nauwkeurig zijn: 0,55% precisie over een spanwijdte van 90.
+Bij optellen alleen was dat bereik 18 en dus 2,8% — vijf keer soepeler. Waar
+de antwoorden het dichtst opeen liggen, vlak bij nul, glipt het model er het
+eerst doorheen. Train-accuratesse is 100%, dus het is geen kwestie van te
+weinig capaciteit om te onthouden.
+
+**Beste configuratie:** `n_embed=32, n_koppen=8, positie + aandacht + W_o +
+ff, softmax, n_stappen=30000` — 14.337 parameters, **98% (min 95%, max 100%)**.
+
+**Vervolgknoppen.** Het bereikprobleem is te omzeilen door het antwoord anders
+te coderen: cijfer voor cijfer voorspellen, of een aparte kop per bewerking.
+Allebei veranderen ze de taak, dus dat is een keuze en geen fix.
