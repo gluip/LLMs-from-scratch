@@ -887,3 +887,144 @@ van de inhoud af, dus het product van gewicht en value bevat producten van
 invoergrootheden. Dat verklaart waarom het model zónder feedforward toch nog
 op 53–69% komt in plaats van te falen. De feedforward doet de laatste,
 beslissende stap: van "ruwweg goed" naar "goed tot op een halve eenheid".
+
+---
+
+## 13. Kan het netwerk zijn eigen omvang leren? (`topologie.py`)
+
+**Opzet.** Nodes die weinig doen weghalen (pruning) en drukke nodes splitsen
+(growing, Net2Net-stijl). Toegepast op de 128 verborgen eenheden van de
+feedforward, bij de bewerking `"drie"`.
+
+Belang per eenheid = spreiding van zijn activatie × gemiddelde grootte van
+zijn uitgaande gewichten. Een eenheid die stilstaat draagt niets bij; een die
+schommelt maar nergens naartoe gaat ook niet.
+
+**Eerst: is er iets te snoeien?** In het getrainde model:
+
+| onderdeel | slack |
+|---|---|
+| feedforward | **21 van de 128** eenheden zijn nooit actief; 47 doen de helft van het werk |
+| koppen | **geen enkele** staat uit (alle 8 wijken 0,26–0,58 van uniform af) |
+| embedding | alle 32 dimensies dragen bij |
+
+Anders dan bij optellen (waar 4 van de 8 koppen niets deden) gebruikt deze
+taak alles behalve een deel van de feedforward.
+
+**Uitkomst — snoeien verliest van niet-snoeien.**
+
+| ff-breedte | stapsgewijs gesnoeid | vanaf nul getraind |
+|---|---|---|
+| 64 | 82% | **98%** |
+| 32 | 87% | **97%** |
+| 16 | 83% | **94%** |
+| 8 | 77% | **94%** |
+
+Eerlijke vergelijking op breedte 32, met gelijk trainingsbudget:
+
+| aanpak | test |
+|---|---|
+| stapsgewijs snoeien + 4.000 stappen bijschaven | 87% |
+| **hetzelfde model, nog 30.000 stappen erbij** | **88%** |
+| in één keer naar 32, dan 30.000 stappen | 95% |
+| vanaf nul op breedte 32 | **97%** |
+
+Die tweede regel is beslissend: 30.000 extra stappen leveren één procentpunt
+op. Het gesnoeide model zit dus vást in een slechtere oplossing, het is niet
+ondergetraind.
+
+**Uitkomst — groeien behoudt maar levert niets op.** De Net2Net-splitsing werkt
+zoals bedoeld: vlak na het splitsen doet het model exact hetzelfde (93% → 93%).
+Maar meer eenheden helpen niet:
+
+| eenheden | test |
+|---|---|
+| 16 (startpunt) | 93% |
+| 32 → 64 → 128 | 92%, 93%, 93% |
+
+Vermoedelijk omdat de kopieën bijna identieke gradiënten krijgen (er zit maar
+1% ruis op) en dus redundant blijven. Niet verder onderzocht.
+
+**Conclusie.** Op deze taak is topologie leren geen winst. Snoeien beschadigt
+het model op een manier die doortrainen niet repareert, en stapsgewijs snoeien
+is slechter dan in één keer. Klein beginnen is beter dan groot beginnen en
+terugsnoeien.
+
+**Voorbehoud.** Dit is één taak, één belang-maat en één snoeischema. De
+literatuur (lottery ticket, RigL) rapporteert wél winst, meestal bij veel
+grotere modellen en met andere criteria. Dit experiment weerlegt dat niet — het
+laat zien dat de eenvoudige versie hier niet werkt.
+
+---
+
+## 14. Mag elke node zijn eigen activatiefunctie kiezen? (`activaties.py`)
+
+**Opzet.** De feedforward is het enige onderdeel dat kan buigen, en wélke bocht
+hangt af van de activatiefunctie. Voor vermenigvuldigen is er een voor de hand
+liggende kandidaat, want een product is uit kwadraten te bouwen:
+
+```
+a·b = ( (a+b)² − (a−b)² ) / 4
+```
+
+Een ReLU moet die kromme met rechte stukjes benaderen; `x²` levert hem in één
+keer. Getest bij `"drie"`, n_embed=32, 8 koppen, 30.000 stappen, 3 seeds.
+
+**Uitkomst 1 — de activatie doet er zeer veel toe, maar anders dan gedacht:**
+
+| feedforward | test | min |
+|---|---|---|
+| geen extra laag | 94% | 90% |
+| **lineair** (`f(x) = x`) | **99%** | 98% |
+| ReLU | 97% | 93% |
+| tanh | 92% | 87% |
+| GELU | 99% | 98% |
+| **kwadraat** (`x²/2`) | **100%** | **100%** |
+
+Het kwadraat haalt als enige 100% bij elke seed — de eerste foutloze score op
+de gecombineerde taak.
+
+**Dit corrigeert experiment 11.** Daar staat dat de feedforward dertig
+procentpunt oplevert en dat dat de niet-lineariteit is die vermenigvuldigen
+nodig heeft. Die meting stond op 10.000 stappen en vergeleek "geen laag" met
+"laag mét ReLU" — twee dingen tegelijk. Met de lineaire variant ertussen valt
+het uiteen:
+
+- geen laag → **lineaire** laag: **+5 punten**, terwijl een lineaire laag het
+  model wiskundig geen enkele nieuwe mogelijkheid geeft (hij valt samen met de
+  omliggende lineaire lagen). Dat is dus capaciteit en conditionering, geen
+  uitdrukkingskracht.
+- lineair → ReLU: **−2 punten.** De ReLU werkt hier averechts.
+- lineair → kwadraat: +1 punt, en pas dán foutloos.
+
+De juiste formulering is dus: *dát* er een extra laag is doet het meeste, en
+*welke* kromming hij kan maken bepaalt of je de laatste procenten haalt. Niet
+"niet-lineariteit is nodig" maar "de passende niet-lineariteit is nodig".
+
+**Uitkomst 2 — laat je het netwerk kiezen, dan kiest het het kwadraat.**
+Elke eenheid krijgt logits over vier functies, softmax daarover geeft de
+mengverhouding, en die logits worden gewoon meegetraind. Discreet kiezen is
+niet differentieerbaar; een zacht mengsel wel — dezelfde truc als DARTS.
+
+| seed | test | relu | kwadraat | tanh | lineair |
+|---|---|---|---|---|---|
+| 0 | 100% | 1 | **74** | 0 | 53 |
+| 1 | 98% | 2 | **96** | 0 | 30 |
+| 2 | 95% | 11 | **93** | 24 | 0 |
+
+(aantal van de 128 eenheden dat die functie als zwaarste kiest)
+
+Consistent over seeds: het kwadraat wint met 74–96 van de 128 eenheden, tanh
+krijgt bij twee van de drie seeds nul stemmen. Het netwerk vindt het juiste
+gereedschap zonder dat iemand het aanwijst.
+
+Let op: het *gemiddelde* mengingsgewicht blijft bij alle functies rond 0,25.
+De meeste eenheden blijven dicht bij een gelijke verdeling en alleen de
+argmax schuift op. De telling is dus de informatieve maat, niet het gemiddelde.
+
+**Praktisch punt over backprop.** `x²` heeft een afgeleide die met de invoer
+meegroeit (bij invoer 50 is de gradiënt 50, bij ReLU altijd 1), dus grote
+activaties geven grote gradiënten geven grotere gewichten. Vandaar in
+`activaties.py`: delen door 2, `clip_grad_norm_` op 1,0, en een controle op
+niet-eindige loss zodat een ontspoorde run zichtbaar wordt in plaats van
+stilletjes onzin te geven.
