@@ -813,3 +813,77 @@ ff, softmax, n_stappen=30000` — 14.337 parameters, **98% (min 95%, max 100%)**
 **Vervolgknoppen.** Het bereikprobleem is te omzeilen door het antwoord anders
 te coderen: cijfer voor cijfer voorspellen, of een aparte kop per bewerking.
 Allebei veranderen ze de taak, dus dat is een keuze en geen fix.
+
+---
+
+## 12. Is vermenigvuldigen nog te ontleden uit de gewichten?
+
+**Opzet.** Bij optellen viel het hele model samen te vouwen tot één regel
+(experiment 5–6), want alles was lineair. Met een ReLU erin kan dat niet meer.
+Wat wel kan: per stadium meten wat er **lineair afleesbaar** is uit de
+toestand op de `=`-positie. Dat onderscheid telt, want de uitleeslaag van het
+model is zelf lineair — wat lineair beschikbaar is, kán het model gebruiken.
+
+Model: de beste configuratie uit experiment 11 (n_embed=32, 8 koppen, ff,
+W_o, 30.000 stappen), alle 100 `*`-sommen.
+
+**Methodische valkuil, en hoe die is afgevangen.** Een probe van 32 dimensies
+plus bias heeft 33 vrije parameters voor 100 datapunten. Op pure ruis geeft
+dat R² = +0,35 als je meet op dezelfde data waarop je fit — en −1,72 op data
+die de probe niet zag. Met 99 dimensies fit je 100 punten perfect zonder iets
+te weten. Alle cijfers hieronder zijn daarom **5-voudig kruisgevalideerd**,
+met een ruis-doel als controle (dat geeft −0,10, zoals het hoort).
+
+**Uitkomst 1 — wat er waar beschikbaar is:**
+
+| doel | vóór de ff | ná de ff |
+|---|---|---|
+| `a` | 0,992 | 0,993 |
+| `b` | 0,994 | 0,990 |
+| `a+b` | 0,998 | 0,998 |
+| `a*b` | 0,986 | **1,000** |
+| ruis (controle) | −0,102 | −0,107 |
+
+De aandacht levert `a` en `b` dus **apart** af, niet alleen hun som.
+
+**Uitkomst 2 — R² is hier een misleidende maat.** Omgerekend naar wat het
+voor het antwoord betekent:
+
+| stadium | R² | typische fout | zou goed afronden |
+|---|---|---|---|
+| vóór de ff | 0,9864 | **2,35** | **26%** |
+| ná de ff | 0,9998 | **0,27** | **96%** |
+| het model zelf | — | 0,29 | 97% |
+
+`a*b` heeft een spreiding van 20,2, dus R² = 0,986 laat een typische fout van
+2,35 over — hopeloos als je op een geheel getal moet afronden. **De
+feedforward brengt de fout terug met een factor negen**, en dát is waar de
+dertig procentpunt uit experiment 11 vandaan komt.
+
+**Uitkomst 3 — de aandacht is zelf al een bron van niet-lineariteit.** Bevries
+de aandachtsgewichten op hun gemiddelde en meet opnieuw:
+
+| toestand vóór de ff | R² voor `a` | R² voor `a*b` |
+|---|---|---|
+| echte, inhoudsafhankelijke aandacht | 0,992 | **0,986** |
+| aandacht bevroren op het gemiddelde | 1,000 | **0,783** |
+
+Met bevroren gewichten wordt de toestand een schone lineaire functie van de
+embeddings — vandaar dat `a` naar 1,000 gaat — en zakt `a*b` naar wat de
+lineaire correlatiestructuur alleen oplevert.
+
+**Conclusie.** Ja, het is te ontleden, maar het antwoord heeft een andere vorm
+dan bij optellen. Daar was het één formule; hier is het een keten van drie
+bijdragen aan hetzelfde product:
+
+| bron | R² voor `a*b` |
+|---|---|
+| lineair alleen (bevroren aandacht) | 0,783 |
+| + de softmax maakt de gewichten inhoudsafhankelijk | 0,986 |
+| + de feedforward | 0,9998 |
+
+De softmax doet dus al een deel van het vermenigvuldigen — de gewichten hangen
+van de inhoud af, dus het product van gewicht en value bevat producten van
+invoergrootheden. Dat verklaart waarom het model zónder feedforward toch nog
+op 53–69% komt in plaats van te falen. De feedforward doet de laatste,
+beslissende stap: van "ruwweg goed" naar "goed tot op een halve eenheid".
