@@ -7,6 +7,68 @@ opzet, uitkomst en conclusie.
 Dit spoor staat los van het char-level taalmodel in `../experiment/`.
 `wiskunde.py` is daar een uitgeklede kopie van, maar evolueert apart.
 
+---
+
+## Huidige staat (bijgewerkt na experiment 10)
+
+Kort overzicht om weer in te komen zonder het hele logboek te lezen.
+
+### Wat er staat
+
+| bestand | wat |
+|---|---|
+| `rekenen.py` | **het huidige model.** Eén klasse `Rekenmodel`, elk onderdeel een knop (`positie`, `leer_aandacht`, `ff`, `n_koppen`, `uit_proj`, `soort`). Plus de drie datasets en de zoektocht naar het minimale model. |
+| `wiskunde.py` | het eerste optel-model (experiment 1 t/m 6). Blijft staan omdat `stabiliteit_vgl.py`, `embeddings_kijken.py` en `binnenkant.py` zijn knoppen gebruiken. |
+| `uitleg.py` | rekent de hele keten na voor één som en maakt de figuren van `verslag-machinerie.html`. |
+| `stabiliteit_vgl.py` | weight-decay-sweep (exp. 2). 90 runs, ~12 min. |
+| `embeddings_kijken.py` | de getallenlijn en layernorm (exp. 3–4). |
+| `binnenkant.py` | Q/K/V en de ablaties (exp. 5–6). |
+| `vergelijk_bewerkingen.py` | optellen vs aftrekken, gewichtsvormen, koppen (exp. 7–10). |
+| `data/` | `simple.txt` (optellen), `aftrekken.txt`, `vermenigvuldigen.txt`, `optellen_aftrekken.txt` |
+| `verslag*.html` | drie standalone verslagen, figuren ingesloten, werken offline |
+
+Draaien met `.venv/bin/python -u <script>`. **Gebruik `-u`**, anders buffert
+Python de uitvoer en zie je minutenlang niets.
+
+### Kleinste model dat foutloos is, per bewerking
+
+| bewerking | nodige onderdelen | n_embed | parameters |
+|---|---|---|---|
+| optellen | geen (vaste middeling volstaat) | 2 | **49** |
+| aftrekken | positie + aandacht + `soort="tanh"` | 4 | **153** |
+| optellen én aftrekken | positie + aandacht + `W_o`, 4 koppen | 8 | **553** |
+
+Alle drie 100% op de achtergehouden sommen, bij elke seed. Gemeenschappelijk:
+`weight_decay=0,3`, `n_stappen=10000`, `lr=3e-3` cosine, `batch=16`,
+splitsing 80/20 met `SPLITS_SEED=42`, 10 seeds.
+
+### De vier dingen die er echt toe doen
+
+1. **Weight decay 0,3 is de belangrijkste knop** (exp. 2). Op AdamW's default
+   varieerde de uitkomst van 40% tot 100% over niets dan de startgewichten.
+2. **Layernorm uit** bij één laag (exp. 4). Met layernorm liggen de cijfers op
+   een boog en haalt het model 95%; zonder wordt het een rechte lijn met
+   gelijke stappen en 100%. Zet hem terug aan zodra je lagen toevoegt.
+3. **De aandacht doet per taak iets anders** (exp. 5, 7, 10): middelen bij
+   optellen, kiezen bij aftrekken, schakelen op het operator-teken bij beide.
+4. **De taak bepaalt de architectuur.** Wat bij optellen weggelaten kon
+   worden, is bij aftrekken het verschil tussen 9% en 100%.
+
+### Nog te doen
+
+- **Vermenigvuldigen.** `data/vermenigvuldigen.txt` staat klaar, 100 regels,
+  39 tokens. Nog niet betrouwbaar gemeten: één afgebroken run gaf `kaal` 4% en
+  `aandacht` 91%. Voorspelling: commutatief maar níet lineair, dus dit zou
+  juist de feedforward moeten afdwingen en positie-informatie overbodig laten.
+  Let op de extrapolatieval: 1, 25, 49, 64 en 81 komen elk maar één keer voor.
+- **`tanh` bij lange reeksen.** Wint bij de losse bewerkingen maar faalt bij
+  de gecombineerde taak (exp. 9–10), en er is niets dat de schaal beteugelt
+  als T groeit. Vraagt om een taak met variabele lengte.
+- **Opruimen.** `wiskunde.py` kan weg zodra de drie oude analyse-scripts naar
+  `rekenen.py` zijn overgezet.
+
+---
+
 ## De vraag
 
 Niet "kan een transformer 100 regels onthouden" (dat kan hij), maar:
@@ -16,9 +78,11 @@ Niet "kan een transformer 100 regels onthouden" (dat kan hij), maar:
 Daarom wordt 20% van de sommen achtergehouden. Alleen de test-accuratesse
 telt; train-accuratesse van 100% zegt niets.
 
-## Vaste opzet
+## Vaste opzet van experiment 1 t/m 6
 
-Tenzij een entry iets anders zegt:
+Deze gold voor het optel-spoor met `wiskunde.py`. Vanaf experiment 7 draait
+alles op `rekenen.py`; zie "Huidige staat" hierboven voor de instellingen die
+nu gelden. Tenzij een entry iets anders zegt:
 
 `data/simple.txt` (100 regels, `a + b = c` voor a,b van 0 t/m 9),
 tokenisatie op getalniveau (21 tokens, `18` is één token), venster 4,
@@ -574,6 +638,18 @@ Gemeten bereik van de gewichten (aftrekken, T=4):
    waarvoor softmax daar zit. Bij T=4 is dat onschuldig. Dit experiment zegt
    dus niets over lange reeksen — daarvoor zou je een taak met variabele
    lengte moeten meten.
+
+**Nagemeten bij het opmaken van de handoff** (10 seeds, aftrekken,
+positie + aandacht):
+
+| n_embed | tanh | getekend | parameters |
+|---|---|---|---|
+| 8 | 100% / 100% | 100% / 100% | 401 |
+| **4** | **100% / 100%** | 97% / 80% | **153** |
+
+Aan de kleine kant is `tanh` dus strikt beter, en de bodem voor aftrekken
+ligt op **153 parameters** in plaats van de 401 die eerder in dit logboek
+stond.
 
 ---
 
