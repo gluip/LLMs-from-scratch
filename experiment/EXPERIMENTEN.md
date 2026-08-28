@@ -602,3 +602,67 @@ implementaties elders in het boek):
   binnenste encoder/decoder, de niet-gemaskeerde PAD-posities in de
   encoder-attention, en `MAX_BROK_LENGTE` (nu 16, nooit los getest - alleen
   `BROK_VENSTER` is dat wel geweest).
+
+---
+
+## Topologie en activatiefuncties leren (`vorm_vgl.py`)
+
+**Herkomst.** In `../exp-math/` (het rekenspoor) is uitgezocht of een netwerk
+zijn eigen vorm kan leren. Daar bleken alle varianten binnen de ruis gelijk,
+met één duidelijke verklaring: die taak was te makkelijk. Vier tot
+tweeëndertig verborgen eenheden gaven allemaal 93–97%, dus er viel niets te
+kiezen. Dit script haalt dezelfde vragen naar een taak waar het model wél
+tegen zijn capaciteitsgrens zit.
+
+**Opzet.** `n_embed=80, n_lagen=5, n_koppen=4, lengte=64`, 6000 stappen,
+lr 3e-3 cosine, 2 seeds. Loss op de laatste positie, zoals gebruikelijk in dit
+logboek. **Let op:** 6000 stappen in plaats van de 18000 van het beste model,
+om meerdere condities te kunnen draaien — de absolute losses zijn dus hoger
+dan in de tabel bovenaan; alleen de onderlinge vergelijking telt.
+
+**Uitkomst 1 — dun verliest van dicht, en niet binnen de ruis.**
+Feedforward-breedte 320, budget 80 actief (een kwart):
+
+| aanpak | loss | parameters |
+|---|---|---|
+| dynamisch groeien/afsterven | 1,3949 | 223.748 |
+| vast willekeurig deel | 1,4037 | 223.748 |
+| **dicht model op hetzelfde budget** | **1,3073** | 223.748 |
+| volle breedte (ijkpunt) | 1,2298 | 416.948 |
+
+Bij **gelijk aantal parameters** is een gewoon smal-maar-dicht model 0,09 nats
+beter dan beide dunne varianten. De ruismarge in dit logboek is 0,01–0,02, dus
+dat is vier tot negen keer de ruis — een echt verschil.
+
+Het onderlinge verschil tussen dynamisch en vast willekeurig (0,009) valt wél
+binnen de ruis. Gebruik-of-verlies levert dus ook hier niets op boven blind
+een deel kiezen.
+
+**Dit is het tegenovergestelde van wat in exp-math werd gevonden**, waar alle
+varianten gelijk uitkwamen. De verklaring ligt voor de hand: bij een taak die
+capaciteit écht nodig heeft, kost het versnipperen van die capaciteit over 320
+plekken waarvan er 80 werken meer dan het oplevert.
+
+**Uitkomst 2 — welke activatiefunctie kiest taal?** (onvolledig, zie hieronder)
+
+| activatie | loss |
+|---|---|
+| relu | 1,2298 |
+| **gelu** | **1,2180** |
+| kwadraat | 1,2297 |
+
+Het kwadraat, dat bij vermenigvuldigen álle andere functies versloeg (100%
+tegen 97% voor ReLU), levert hier niets op — precies gelijk aan ReLU. Dat is
+consistent met de verklaring daar: `a*b = ((a+b)²-(a-b)²)/4`, dus een kwadraat
+is bij vermenigvuldigen het juiste gereedschap en bij taal niet. GELU is 0,012
+beter dan ReLU, wat op de rand van de ruis ligt.
+
+**Nog te doen.** De run is afgebroken voordat de twee interessantste condities
+klaar waren: `lineair` (die bij het rekenmodel verrassend goed was en de
+conclusie daar omdraaide) en vooral **vrije keuze per eenheid** — waar elke
+eenheid zelf een mengsel van de vier functies kiest en je achteraf kunt
+uitlezen waar taal voor kiest. Bij het rekenmodel koos 74–96 van de 128
+eenheden het kwadraat; de vergelijking met taal is de eigenlijke vraag.
+
+`vorm_vgl.py` is GPU-klaar gemaakt (randperm op het juiste apparaat). Op een
+GPU horen `N_STAPPEN` op 18000 en `SEEDS` op range(3) te staan.
